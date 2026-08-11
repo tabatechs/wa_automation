@@ -26,7 +26,9 @@ cp .env.example .env
 npm run list-groups
 ```
 
-Um QR code aparece no terminal. No celular: **Configurações → Aparelhos conectados → Conectar um aparelho**. Depois de parear, o script imprime todos os seus grupos com os respectivos ids.
+Um QR code é desenhado **no terminal** (o processo roda headless, sem janela do Chromium). No celular: **Configurações → Aparelhos conectados → Conectar um aparelho**. Depois de parear, o script imprime todos os seus grupos com os respectivos ids.
+
+> Se preferir ver o navegador — para depurar o que a página está fazendo — rode com `HEADLESS=false`. Aí o QR aparece tanto na janela do Chromium quanto no terminal.
 
 **2. Configure a whitelist**
 
@@ -140,7 +142,7 @@ Tudo em `.env` (veja `.env.example`):
 | Variável | Default | O que faz |
 |---|---|---|
 | `SESSION_ID` | `wa-monitor` | Nome do arquivo de credenciais em `data/session/` |
-| `HEADLESS` | `false` | `true` roda sem janela do Chromium |
+| `HEADLESS` | `true` | Sem janela do Chromium; o QR sai no terminal. `false` abre a janela, útil só para depurar |
 | `EVENTS_FILE` | `data/events.jsonl` | Onde os eventos são gravados |
 | `EVENTS_MAX_BYTES` | `52428800` | Rotaciona o arquivo ao passar deste tamanho |
 | `REACTION_POLL_MS` | `30000` | Intervalo do polling de reações |

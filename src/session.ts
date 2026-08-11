@@ -46,6 +46,9 @@ export async function startSession(
     // Sem timeout no QR/auth: o QR fica no terminal até ser escaneado.
     qrTimeout: 0,
     authTimeout: 0,
+    // Garante o QR desenhado no terminal. Com headless não há janela do
+    // Chromium, então este é o único caminho para autenticar.
+    qrLogSkip: false,
 
     // Este é um monitor de longa duração; cache em disco só incha o perfil.
     cacheEnabled: false,

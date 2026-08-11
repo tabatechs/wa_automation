@@ -22,10 +22,11 @@ function resolveFromRoot(p: string): string {
 
 const envSchema = z.object({
   SESSION_ID: z.string().min(1).default('wa-monitor'),
+  // Headless por padrão: sem janela do Chromium, QR direto no terminal.
   HEADLESS: z
     .string()
-    .default('false')
-    .transform((v) => v.toLowerCase() === 'true'),
+    .default('true')
+    .transform((v) => v.toLowerCase() !== 'false'),
   EVENTS_FILE: z.string().min(1).default('data/events.jsonl'),
   EVENTS_MAX_BYTES: z.coerce.number().int().positive().default(50 * 1024 * 1024),
   REACTION_POLL_MS: z.coerce.number().int().min(5_000).default(30_000),
