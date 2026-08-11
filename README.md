@@ -182,6 +182,7 @@ Tudo em `.env` (veja `.env.example`):
 | `npm run build` && `npm start` | Compila e roda a versão compilada |
 | `npm run list-groups` | Lista os grupos da conta com seus ids |
 | `npm run compact` | Converte o JSONL num array `.json` |
+| `npm test` | Suíte de testes (não precisa de sessão nem de rede) |
 | `npm run typecheck` | Checagem de tipos |
 
 ## Estrutura

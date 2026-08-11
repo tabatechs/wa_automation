@@ -10,6 +10,7 @@
     "start": "node dist/index.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx tests/run.ts",
     "list-groups": "tsx src/scripts/list-groups.ts",
     "compact": "tsx src/scripts/compact.ts"
   },

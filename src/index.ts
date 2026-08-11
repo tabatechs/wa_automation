@@ -50,7 +50,7 @@ async function main(): Promise<void> {
   const window = new MessageWindow(
     config.reactionWindowSize,
     config.reactionWindowMs,
-    (groupId, messageId) => reactions?.noteLiveMessage(groupId, messageId),
+    (groupId, messageId, at) => reactions?.noteLiveMessage(groupId, messageId, at),
   );
   const reactionsCollector = new ReactionsCollector(window, config.stateDir);
   reactions = reactionsCollector;

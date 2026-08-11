@@ -25,16 +25,17 @@ export class MessageWindow {
      * verdade — sem esse gancho, a primeira varredura seria silenciosa e
      * perderia as reações dos primeiros ~30 s de vida da mensagem.
      */
-    private readonly onFirstSeen?: (groupId: string, messageId: string) => void,
+    private readonly onFirstSeen?: (groupId: string, messageId: string, at: number) => void,
   ) {}
 
   track(groupId: string, messageId: string, at: number): void {
     if (!messageId) return;
     const list = this.byGroup.get(groupId) ?? [];
     if (list.some((m) => m.messageId === messageId)) return;
-    list.push({ messageId, at: at || Date.now() });
+    const stamp = at || Date.now();
+    list.push({ messageId, at: stamp });
     this.byGroup.set(groupId, this.prune(list));
-    this.onFirstSeen?.(groupId, messageId);
+    this.onFirstSeen?.(groupId, messageId, stamp);
   }
 
   /** Ids atualmente na janela do grupo. */

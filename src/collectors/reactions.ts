@@ -25,15 +25,28 @@ import type { Collector, CollectorContext } from './Collector';
 import type { MessageWindow } from './messageWindow';
 
 const log = createLogger('collector:reactions');
-const STATE_VERSION = 1;
+/**
+ * v2: cada mensagem passou a guardar o próprio timestamp, para que a poda do
+ * estado seja por IDADE. Na v1 a poda descartava tudo que não estivesse na
+ * MessageWindow — e como a janela é só memória, ela nasce vazia a cada
+ * restart, o que apagava o registro de reações já emitidas e fazia o backfill
+ * reemiti-las. Estado durável não pode depender de estrutura volátil.
+ */
+const STATE_VERSION = 2;
 
 /** Chave de uma reação individual: quem reagiu + com quê. */
 type ReactionKey = `${string}|${string}`;
 
+interface MessageReactions {
+  keys: Set<ReactionKey>;
+  /** Epoch ms da mensagem, usado só para expirar o registro. */
+  at: number;
+}
+
 interface PersistedState {
   version: number;
-  /** groupId -> messageId -> lista de ReactionKey */
-  groups: Record<string, Record<string, string[]>>;
+  /** groupId -> messageId -> { k: chaves já emitidas, at: epoch ms } */
+  groups: Record<string, Record<string, { k: string[]; at: number }>>;
 }
 
 interface ReactionSenderLike {
@@ -46,8 +59,8 @@ interface ReactionSenderLike {
 export class ReactionsCollector implements Collector {
   readonly name = 'reactions';
 
-  /** groupId -> messageId -> conjunto de reações conhecidas. */
-  private readonly state = new Map<string, Map<string, Set<ReactionKey>>>();
+  /** groupId -> messageId -> reações já emitidas. */
+  private readonly state = new Map<string, Map<string, MessageReactions>>();
   private timer: NodeJS.Timeout | null = null;
   private running = false;
   private stopped = false;
@@ -62,12 +75,16 @@ export class ReactionsCollector implements Collector {
   }
 
   /**
-   * Fixa a linha de base de uma mensagem vista ao vivo como "sem reações".
-   * Chamado pela MessageWindow via callback.
+   * Fixa a linha de base de uma mensagem entrando na janela como "nenhuma
+   * reação emitida ainda". Chamado pela MessageWindow via callback.
+   *
+   * Só age se a mensagem for desconhecida: se o estado já a conhece — inclusive
+   * vindo do disco após um restart — a linha de base preservada é o que impede
+   * reemitir reações que já foram registradas.
    */
-  noteLiveMessage(groupId: string, messageId: string): void {
-    const group = this.state.get(groupId) ?? new Map<string, Set<ReactionKey>>();
-    if (!group.has(messageId)) group.set(messageId, new Set());
+  noteLiveMessage(groupId: string, messageId: string, at: number): void {
+    const group = this.state.get(groupId) ?? new Map<string, MessageReactions>();
+    if (!group.has(messageId)) group.set(messageId, { keys: new Set(), at });
     this.state.set(groupId, group);
   }
 
@@ -92,6 +109,7 @@ export class ReactionsCollector implements Collector {
       for (const group of ctx.config.groups) {
         await this.pollGroup(ctx, group.id);
       }
+      this.pruneByAge(ctx);
       this.persist();
     } catch (error) {
       log.error('ciclo de polling falhou', error);
@@ -116,22 +134,24 @@ export class ReactionsCollector implements Collector {
       return;
     }
 
-    const groupState = this.state.get(groupId) ?? new Map<string, Set<ReactionKey>>();
+    const groupState = this.state.get(groupId) ?? new Map<string, MessageReactions>();
 
     for (const message of messages ?? []) {
       const messageId = String(message?.id ?? '');
       if (!messageId || !tracked.has(messageId)) continue;
 
       const current = extractReactions(message);
-      const previous = groupState.get(messageId);
+      const entry = groupState.get(messageId);
 
-      if (previous === undefined) {
-        // Nunca diffamos esta mensagem (veio do histórico). Semeia em silêncio:
-        // emitir aqui despejaria reações antigas como se fossem novas.
-        groupState.set(messageId, new Set(current.keys()));
+      if (entry === undefined) {
+        // Mensagem que nunca passou pela janela (nem ao vivo, nem pelo
+        // backfill). Semeia em silêncio: não sabemos o que já foi registrado
+        // antes, e emitir aqui despejaria reações antigas como se fossem novas.
+        groupState.set(messageId, { keys: new Set(current.keys()), at: messageTime(message) });
         continue;
       }
 
+      const previous = entry.keys;
       for (const [key, detail] of current) {
         if (!previous.has(key)) {
           await this.emitReaction(ctx, groupId, messageId, detail, 'reaction_added');
@@ -150,15 +170,39 @@ export class ReactionsCollector implements Collector {
         }
       }
 
-      groupState.set(messageId, new Set(current.keys()));
-    }
-
-    // Descarta mensagens que saíram da janela para o estado não crescer sem fim.
-    for (const messageId of [...groupState.keys()]) {
-      if (!tracked.has(messageId)) groupState.delete(messageId);
+      groupState.set(messageId, { keys: new Set(current.keys()), at: entry.at });
     }
 
     this.state.set(groupId, groupState);
+  }
+
+  /**
+   * Expira registros antigos para o estado não crescer sem fim.
+   *
+   * A retenção precisa cobrir a janela do backfill: enquanto o backfill puder
+   * retrazer uma mensagem, o registro de quais reações dela já foram emitidas
+   * tem de continuar existindo — senão elas seriam emitidas de novo.
+   */
+  private pruneByAge(ctx: CollectorContext): void {
+    const retentionMs = Math.max(
+      ctx.config.backfillDays * 24 * 60 * 60 * 1000,
+      ctx.config.reactionWindowMs,
+    );
+    const cutoff = Date.now() - retentionMs;
+
+    let removed = 0;
+    for (const [groupId, groupState] of this.state) {
+      for (const [messageId, entry] of groupState) {
+        // at === 0 significa timestamp desconhecido; nesse caso não expira,
+        // porque não dá para provar que é antigo o bastante.
+        if (entry.at > 0 && entry.at < cutoff) {
+          groupState.delete(messageId);
+          removed += 1;
+        }
+      }
+      if (groupState.size === 0) this.state.delete(groupId);
+    }
+    if (removed) log.debug('registros de reação expirados', { removed });
   }
 
   private async emitReaction(
@@ -198,16 +242,35 @@ export class ReactionsCollector implements Collector {
 
   private load(): void {
     try {
-      const raw = JSON.parse(readFileSync(this.statePath, 'utf8')) as PersistedState;
-      if (raw?.version !== STATE_VERSION || !raw.groups) return;
+      const raw = JSON.parse(readFileSync(this.statePath, 'utf8')) as
+        | PersistedState
+        | { version: 1; groups: Record<string, Record<string, string[]>> };
+      if (!raw?.groups) return;
+
+      // O v1 não guardava timestamp por mensagem. Migra preservando as chaves
+      // já emitidas — é justamente esse registro que evita reemissão — e marca
+      // `at: 0`, que a poda por idade trata como "não expirar".
+      const isV1 = raw.version === 1;
+
       for (const [groupId, messages] of Object.entries(raw.groups)) {
-        const group = new Map<string, Set<ReactionKey>>();
-        for (const [messageId, keys] of Object.entries(messages)) {
-          group.set(messageId, new Set(keys as ReactionKey[]));
+        const group = new Map<string, MessageReactions>();
+        for (const [messageId, value] of Object.entries(messages)) {
+          if (isV1) {
+            group.set(messageId, { keys: new Set(value as ReactionKey[]), at: 0 });
+          } else {
+            const entry = value as { k: string[]; at: number };
+            group.set(messageId, {
+              keys: new Set((entry.k ?? []) as ReactionKey[]),
+              at: typeof entry.at === 'number' ? entry.at : 0,
+            });
+          }
         }
         this.state.set(groupId, group);
       }
-      log.info('estado de reações restaurado', { groups: this.state.size });
+      log.info('estado de reações restaurado', {
+        groups: this.state.size,
+        migradoDoV1: isV1,
+      });
     } catch {
       // Primeira execução ou arquivo corrompido: começa do zero. As mensagens
       // do histórico serão semeadas em silêncio na primeira varredura.
@@ -217,8 +280,10 @@ export class ReactionsCollector implements Collector {
   private persist(): void {
     const payload: PersistedState = { version: STATE_VERSION, groups: {} };
     for (const [groupId, messages] of this.state) {
-      const serialized: Record<string, string[]> = {};
-      for (const [messageId, keys] of messages) serialized[messageId] = [...keys];
+      const serialized: Record<string, { k: string[]; at: number }> = {};
+      for (const [messageId, entry] of messages) {
+        serialized[messageId] = { k: [...entry.keys], at: entry.at };
+      }
       payload.groups[groupId] = serialized;
     }
 
@@ -238,6 +303,13 @@ interface ReactionDetail {
   senderId: string;
   emoji: string;
   reactedAt: string | null;
+}
+
+/** Epoch ms da mensagem, ou 0 quando o timestamp não é utilizável. */
+function messageTime(message: Message): number {
+  const raw = message?.timestamp ?? (message as { t?: number })?.t;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return 0;
+  return raw > 1e11 ? raw : raw * 1000;
 }
 
 /** Achata Message.reactions[].senders[] num mapa chave -> detalhe. */
