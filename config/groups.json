@@ -1,0 +1,14 @@
+{
+  "$comment": [
+    "Whitelist dos grupos monitorados. SOMENTE o que estiver aqui é gravado em disco.",
+    "Rode `npm run list-groups` com a sessão ativa para descobrir os ids reais.",
+    "O id de grupo sempre termina em @g.us. Deixe a lista vazia e nada será persistido."
+  ],
+  "groups": [
+    {
+      "id": "000000000000000000@g.us",
+      "label": "SUBSTITUA pelo id real — veja npm run list-groups",
+      "enabled": false
+    }
+  ]
+}

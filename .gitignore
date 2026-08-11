@@ -1,0 +1,31 @@
+# Dependências
+node_modules/
+# Build
+dist/
+# ---------------------------------------------------------------------------
+# NUNCA versionar: data/ contém as credenciais de autenticação da sessão do
+# WhatsApp (data/session/*.data.json) e todo o conteúdo capturado dos grupos.
+# Vazar esses arquivos equivale a entregar acesso à conta.
+# ---------------------------------------------------------------------------
+data/
+*.data.json
+# Segredos
+.env
+.env.*
+!.env.example
+# Artefatos do open-wa / puppeteer
+.wwebjs*
+session/
+*.session.json
+logs/
+*.log
+# SO / editor
+.DS_Store
+.idea/
+.vscode/
+
+# managed by open-wa
+**.data.json
+**.node-persist**
+**_IGNORE_**
+# end managed by open-wa
