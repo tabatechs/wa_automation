@@ -149,6 +149,9 @@ Tudo em `.env` (veja `.env.example`):
 | `REACTION_WINDOW_SIZE` | `200` | Mensagens recentes por grupo sob vigilância |
 | `REACTION_WINDOW_HOURS` | `48` | Idade máxima de uma mensagem na janela |
 | `ROSTER_TTL_MS` | `900000` | TTL do cache de nomes/números |
+| `USER_AGENT` | *(auto)* | UA enviado ao WA Web. Nunca use um com prefixo `WhatsApp/` |
+| `USE_CHROME` | `false` | `true` usa o Chrome do sistema em vez do Chromium do puppeteer |
+| `CHROME_PATH` | — | Caminho explícito de um navegador |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 
 ## Scripts
@@ -180,6 +183,13 @@ Coletores e sink são desacoplados por interface: trocar o destino (Postgres, S3
 ---
 
 ## Notas técnicas
+
+- **Por que sobrescrevemos o user-agent.** O `@open-wa/wa-automate` 4.76.0 envia por padrão o UA `WhatsApp/2.2147.16 … Chrome/104.0.0.0`, e o WhatsApp Web hoje **rejeita qualquer UA com o prefixo `WhatsApp/`**, devolvendo a página *"WhatsApp works with Google Chrome 100+"*. A mensagem é enganosa: a versão do navegador não tem nada a ver — com o prefixo, Chrome 104 e Chrome 131 falham igual; sem o prefixo, ambos carregam.
+
+  A opção `customUserAgent` do config **não resolve**, porque a lib só a lê quando `inDocker: true` (em `controllers/initializer.js`, a variável é atribuída dentro desse `if` e chega `undefined` em `initPage`). Por isso `src/session.ts` sobrescreve o UA padrão do módulo antes do `create()`. Se um dia o WA Web recusar de novo, é só definir `USER_AGENT` no `.env`.
+
+- **Não é preciso ter Chrome instalado.** O Chromium que o puppeteer baixa junto funciona. `USE_CHROME` e `CHROME_PATH` existem só como escape hatch.
+
 
 - **Por que v4.76.0 e não v5?** A v5 (alpha) declara `onReaction` e `onParticipantsChanged` como gratuitos no schema, mas o runtime só faz binding real de 6 eventos — reações e mudança de participantes não são emitidas. A v4 entrega os eventos de participantes de graça e permite derivar as reações.
 - **Risco de ban.** A doc do open-wa aponta o envio não solicitado como o principal fator de risco. Este projeto só lê, o que mantém o risco baixo. Ainda assim: é software não oficial, não afiliado ao WhatsApp/Meta, e o uso é por sua conta e risco.

@@ -27,6 +27,16 @@ const envSchema = z.object({
     .string()
     .default('true')
     .transform((v) => v.toLowerCase() !== 'false'),
+  // Escape hatch: usar o Chrome instalado no sistema em vez do Chromium que o
+  // puppeteer já baixou. Não é necessário — ver o comentário em session.ts.
+  USE_CHROME: z
+    .string()
+    .default('false')
+    .transform((v) => v.toLowerCase() === 'true'),
+  // Caminho explícito do navegador. Vazio = usa o Chromium do puppeteer.
+  CHROME_PATH: z.string().optional(),
+  // Sobrescreve o user-agent. Vazio = usa o padrão calculado em session.ts.
+  USER_AGENT: z.string().optional(),
   EVENTS_FILE: z.string().min(1).default('data/events.jsonl'),
   EVENTS_MAX_BYTES: z.coerce.number().int().positive().default(50 * 1024 * 1024),
   REACTION_POLL_MS: z.coerce.number().int().min(5_000).default(30_000),
@@ -54,6 +64,9 @@ export interface MonitoredGroup {
 export interface AppConfig {
   sessionId: string;
   headless: boolean;
+  useChrome: boolean;
+  chromePath?: string;
+  userAgent?: string;
   /** Diretório onde o open-wa guarda as credenciais da sessão. */
   sessionDataPath: string;
   eventsFile: string;
@@ -98,6 +111,9 @@ export function loadConfig(): AppConfig {
   return {
     sessionId: env.SESSION_ID,
     headless: env.HEADLESS,
+    useChrome: env.USE_CHROME,
+    ...(env.CHROME_PATH ? { chromePath: env.CHROME_PATH } : {}),
+    ...(env.USER_AGENT ? { userAgent: env.USER_AGENT } : {}),
     sessionDataPath: resolveFromRoot('data/session'),
     eventsFile: resolveFromRoot(env.EVENTS_FILE),
     eventsMaxBytes: env.EVENTS_MAX_BYTES,
