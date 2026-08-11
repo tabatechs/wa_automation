@@ -63,6 +63,7 @@ export class ParticipantsCollector implements Collector {
       action: KNOWN_ACTIONS[rawAction.toLowerCase()] ?? 'unknown',
       rawAction,
       who,
+      detectedOnResume: false,
     };
 
     const captured: CapturedEvent = {

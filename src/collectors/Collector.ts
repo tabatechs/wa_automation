@@ -3,6 +3,7 @@ import type { randomUUID } from 'node:crypto';
 import type { AppConfig } from '../config';
 import type { Roster } from '../enrich/roster';
 import type { Sink } from '../sink/Sink';
+import type { CheckpointStore } from '../state/checkpoint';
 import type { CapturedEvent } from '../types';
 
 /** Tudo que um coletor precisa para trabalhar. */
@@ -11,6 +12,8 @@ export interface CollectorContext {
   config: AppConfig;
   roster: Roster;
   sink: Sink;
+  /** Estado de retomada: dedupe de mensagens e diff de participantes. */
+  checkpoint: CheckpointStore;
   /**
    * true se o grupo está na whitelist. Chame na PRIMEIRA linha de cada handler.
    * É um type guard: depois dele o chatId já está estreitado para string.

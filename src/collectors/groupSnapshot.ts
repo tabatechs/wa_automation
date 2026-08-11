@@ -15,7 +15,9 @@ export async function emitGroupSnapshot(
   groupId: string,
   reason: GroupSnapshotPayload['reason'],
 ): Promise<void> {
-  const participants = await ctx.roster.groupMembers(groupId);
+  // No boot vale esperar os metadados sincronizarem: um grupo grande pode
+  // responder com lista vazia nos primeiros segundos após a sessão ficar pronta.
+  const participants = await ctx.roster.groupMembers(groupId, reason === 'boot');
 
   let subject: string | null = null;
   let description: string | null = null;

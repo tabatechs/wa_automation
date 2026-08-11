@@ -16,6 +16,8 @@ import { MessageWindow } from './collectors/messageWindow';
 import { MessagesCollector } from './collectors/messages';
 import { ParticipantsCollector } from './collectors/participants';
 import { ReactionsCollector } from './collectors/reactions';
+import { BackfillCollector } from './collectors/backfill';
+import { CheckpointStore } from './state/checkpoint';
 import { emitGroupSnapshot } from './collectors/groupSnapshot';
 import type { Collector, CollectorContext } from './collectors/Collector';
 import { EVENT_SCHEMA_VERSION, type CapturedEvent } from './types';
@@ -53,23 +55,34 @@ async function main(): Promise<void> {
   const reactionsCollector = new ReactionsCollector(window, config.stateDir);
   reactions = reactionsCollector;
 
+  const checkpoint = new CheckpointStore(config.stateDir);
+
+  // A ordem importa. Os listeners ao vivo entram primeiro para não perder nada
+  // que chegue durante o backfill; a sobreposição entre os dois é resolvida
+  // pelo dedupe por messageId no checkpoint. O backfill vem antes do coletor de
+  // reações para que a janela já esteja povoada na primeira varredura.
   const collectors: Collector[] = [
     new MessagesCollector(window),
     new ParticipantsCollector(),
+    new BackfillCollector(window),
     reactionsCollector,
   ];
 
   let shuttingDown = false;
 
   const wire = async (client: Client): Promise<void> => {
-    const ctx = buildContext(client, config, sink);
-    for (const collector of collectors) {
-      await collector.start(ctx);
-    }
+    const ctx = buildContext(client, config, sink, checkpoint);
+    // Descobre o número da própria conta antes de qualquer coletor, senão as
+    // mensagens enviadas por você sairiam sem autor.
+    await ctx.roster.loadHostIdentity();
     await registerStateListener(ctx);
     for (const group of config.groups) {
       await emitGroupSnapshot(ctx, group.id, 'boot');
     }
+    for (const collector of collectors) {
+      await collector.start(ctx);
+    }
+    checkpoint.save();
   };
 
   const client = await startSession(config, async (restarted) => {
@@ -87,6 +100,9 @@ async function main(): Promise<void> {
     for (const collector of collectors) {
       await collector.stop().catch((e) => log.warn(`falha ao parar ${collector.name}`, e));
     }
+    // Persiste o ponto de retomada antes de sair: é o que permite a próxima
+    // execução capturar só o que aconteceu no intervalo.
+    checkpoint.save();
     await stopSession(client);
     await sink.close();
     process.exit(0);
@@ -96,7 +112,12 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
-function buildContext(client: Client, config: AppConfig, sink: Sink): CollectorContext {
+function buildContext(
+  client: Client,
+  config: AppConfig,
+  sink: Sink,
+  checkpoint: CheckpointStore,
+): CollectorContext {
   const roster = new Roster(client, config.rosterTtlMs);
   const nameCache = new Map<string, string | null>();
 
@@ -105,6 +126,7 @@ function buildContext(client: Client, config: AppConfig, sink: Sink): CollectorC
     config,
     roster,
     sink,
+    checkpoint,
     isMonitored: (chatId): chatId is string =>
       typeof chatId === 'string' && config.groupIds.has(chatId),
     async groupName(groupId: string): Promise<string | null> {

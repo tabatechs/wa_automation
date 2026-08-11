@@ -38,19 +38,29 @@ export class MessagesCollector implements Collector {
     // em memória e nunca chega ao disco.
     if (!ctx.isMonitored(groupId)) return;
 
+    // Se a mensagem é da própria conta, a identidade do host é autoritativa —
+    // melhor do que tentar traduzir o LID do dispositivo que enviou.
     const authorId = resolveAuthorId(message);
-    const actor = await ctx.roster.resolve(authorId);
+    const actor = message.fromMe
+      ? ((await ctx.roster.resolveSelf()) ?? (await ctx.roster.resolve(authorId)))
+      : await ctx.roster.resolve(authorId);
     const sentAt = waTimestampToIso(message.timestamp ?? (message as { t?: number }).t);
+    const messageId = String(message.id ?? '');
+    const at = sentAt ? Date.parse(sentAt) : Date.now();
+
+    // Dedupe compartilhado com o backfill: o histórico lido no boot e o
+    // listener ao vivo se sobrepõem, e sem isto a mesma mensagem sairia duas
+    // vezes no events.jsonl.
+    if (!ctx.checkpoint.markMessageEmitted(groupId, messageId, at)) {
+      log.debug('mensagem já registrada, ignorando', { messageId });
+      return;
+    }
 
     // Registra na janela para o coletor de reações vigiar esta mensagem.
-    this.window.track(
-      groupId,
-      String(message.id ?? ''),
-      sentAt ? Date.parse(sentAt) : Date.now(),
-    );
+    this.window.track(groupId, messageId, at);
 
     const payload: MessagePayload = {
-      messageId: String(message.id ?? ''),
+      messageId,
       sentAt,
       messageType: String(message.type ?? 'unknown'),
       body: nonEmpty(message.body),
@@ -62,6 +72,7 @@ export class MessagesCollector implements Collector {
       mentionedIds: Array.isArray(message.mentionedJidList)
         ? message.mentionedJidList.map(String)
         : [],
+      backfill: false,
     };
 
     const event: CapturedEvent = {

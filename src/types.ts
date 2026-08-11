@@ -58,6 +58,12 @@ export interface MessagePayload {
   fromMe: boolean;
   quotedMsgId: string | null;
   mentionedIds: string[];
+  /**
+   * true quando a mensagem veio do backfill (histórico lido no boot) em vez do
+   * listener ao vivo. Útil para distinguir captura retroativa de tempo real —
+   * `capturedAt` de uma mensagem com backfill:true é muito posterior a `sentAt`.
+   */
+  backfill: boolean;
 }
 
 export interface ReactionPayload {
@@ -75,6 +81,13 @@ export interface ParticipantsChangedPayload {
   /** Ação bruta reportada pelo open-wa, preservada para não perder informação. */
   rawAction: string;
   who: Actor[];
+  /**
+   * true quando a mudança foi inferida no boot, comparando a lista atual com o
+   * checkpoint da execução anterior — ou seja, aconteceu com o monitor parado.
+   * Nesses casos `actor` é null e o horário exato é desconhecido: o WhatsApp
+   * não guarda esse rastro para quem não estava escutando.
+   */
+  detectedOnResume: boolean;
 }
 
 export interface ParticipantSnapshot extends Actor {

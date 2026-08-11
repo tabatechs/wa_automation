@@ -43,6 +43,16 @@ const envSchema = z.object({
   REACTION_WINDOW_SIZE: z.coerce.number().int().positive().default(200),
   REACTION_WINDOW_HOURS: z.coerce.number().positive().default(48),
   ROSTER_TTL_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
+  // --- Backfill do histórico ---
+  BACKFILL_ENABLED: z
+    .string()
+    .default('true')
+    .transform((v) => v.toLowerCase() !== 'false'),
+  // Janela em dias usada no PRIMEIRO contato com um grupo. Nas execuções
+  // seguintes, o checkpoint manda e só o que é novo é lido.
+  BACKFILL_DAYS: z.coerce.number().positive().default(7),
+  // Teto de segurança: evita paginar indefinidamente num grupo muito ativo.
+  BACKFILL_MAX_MESSAGES: z.coerce.number().int().positive().default(5_000),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
 });
 
@@ -76,6 +86,9 @@ export interface AppConfig {
   reactionWindowSize: number;
   reactionWindowMs: number;
   rosterTtlMs: number;
+  backfillEnabled: boolean;
+  backfillDays: number;
+  backfillMaxMessages: number;
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   groups: MonitoredGroup[];
   /** Ids habilitados, para checagem rápida de whitelist. */
@@ -122,6 +135,9 @@ export function loadConfig(): AppConfig {
     reactionWindowSize: env.REACTION_WINDOW_SIZE,
     reactionWindowMs: env.REACTION_WINDOW_HOURS * 60 * 60 * 1000,
     rosterTtlMs: env.ROSTER_TTL_MS,
+    backfillEnabled: env.BACKFILL_ENABLED,
+    backfillDays: env.BACKFILL_DAYS,
+    backfillMaxMessages: env.BACKFILL_MAX_MESSAGES,
     logLevel: env.LOG_LEVEL,
     groups,
     groupIds: new Set(groups.map((g) => g.id)),

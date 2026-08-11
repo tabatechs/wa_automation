@@ -1,0 +1,267 @@
+/**
+ * Backfill: recupera o que aconteceu antes de o monitor subir.
+ *
+ * Roda uma vez por boot, por grupo, e resolve dois cenários com a mesma lógica:
+ *
+ *   - primeiro contato com o grupo → puxa a janela de BACKFILL_DAYS dias;
+ *   - retomada após o monitor ficar parado → puxa desde a última mensagem
+ *     registrada no checkpoint, então só entra o que é novo.
+ *
+ * Também reconcilia participantes: compara a lista atual com a do checkpoint e
+ * emite as entradas/saídas ocorridas com o processo desligado. Essas mudanças
+ * não têm autor nem horário conhecidos — o WhatsApp não guarda esse rastro para
+ * quem não estava escutando — então saem marcadas com `detectedOnResume`.
+ *
+ * A deduplicação é por messageId no checkpoint, então rodar o backfill de novo
+ * (ou sobrepor com o listener ao vivo) não duplica evento nenhum.
+ *
+ * Limite honesto: no multi-device o WhatsApp só sincroniza uma janela de
+ * histórico para os aparelhos conectados. `loadEarlierMessages` vai até onde o
+ * WhatsApp entregou e para — não existe "o grupo inteiro desde a criação".
+ */
+
+import type { Client, Message } from '@open-wa/wa-automate';
+import { EVENT_SCHEMA_VERSION } from '../types';
+import type { CapturedEvent, MessagePayload, ParticipantsChangedPayload } from '../types';
+import { waTimestampToIso } from '../util/phone';
+import { createLogger } from '../util/logger';
+import type { Collector, CollectorContext } from './Collector';
+import type { MessageWindow } from './messageWindow';
+
+const log = createLogger('collector:backfill');
+
+export class BackfillCollector implements Collector {
+  readonly name = 'backfill';
+
+  constructor(private readonly window: MessageWindow) {}
+
+  async start(ctx: CollectorContext): Promise<void> {
+    if (!ctx.config.backfillEnabled) {
+      log.info('backfill desabilitado por configuração');
+      return;
+    }
+
+    for (const group of ctx.config.groups) {
+      try {
+        await this.backfillGroup(ctx, group.id);
+        await this.reconcileParticipants(ctx, group.id);
+      } catch (error) {
+        log.error('backfill do grupo falhou', { groupId: group.id, error: String(error) });
+      }
+    }
+    ctx.checkpoint.save();
+  }
+
+  private async backfillGroup(ctx: CollectorContext, groupId: string): Promise<void> {
+    const checkpoint = ctx.checkpoint.get(groupId);
+    const windowStart = Date.now() - ctx.config.backfillDays * 24 * 60 * 60 * 1000;
+
+    // Retomada: parte da última mensagem registrada. Primeiro contato: usa a
+    // janela de dias configurada. O mais recente dos dois evita reler o que já
+    // temos e, ao mesmo tempo, respeita o teto de dias no primeiro run.
+    const since =
+      checkpoint.lastMessageAt !== null
+        ? Math.max(checkpoint.lastMessageAt, windowStart)
+        : windowStart;
+
+    log.info('iniciando backfill', {
+      groupId,
+      desde: new Date(since).toISOString(),
+      retomada: checkpoint.lastMessageAt !== null,
+    });
+
+    const messages = await this.loadUntil(ctx, groupId, since);
+    if (messages.length === 0) {
+      log.info('nada a recuperar', { groupId });
+      return;
+    }
+
+    // Ordem cronológica: o arquivo fica legível e o checkpoint avança certo.
+    messages.sort((a, b) => messageTime(a) - messageTime(b));
+
+    let emitted = 0;
+    let skipped = 0;
+    for (const message of messages) {
+      const at = messageTime(message);
+      if (at < since) continue;
+
+      const messageId = String(message?.id ?? '');
+      if (!ctx.checkpoint.markMessageEmitted(groupId, messageId, at)) {
+        skipped += 1;
+        continue;
+      }
+
+      await this.emitMessage(ctx, groupId, message, at);
+      emitted += 1;
+    }
+
+    log.info('backfill concluído', { groupId, emitidas: emitted, jaConhecidas: skipped });
+  }
+
+  /**
+   * Pagina o histórico para trás até cobrir `since`, esgotar o que o WhatsApp
+   * sincronizou, ou bater o teto de mensagens.
+   */
+  private async loadUntil(
+    ctx: CollectorContext,
+    groupId: string,
+    since: number,
+  ): Promise<Message[]> {
+    const chatId = groupId as Parameters<Client['getAllMessagesInChat']>[0];
+    let messages = await this.safeGetAll(ctx, chatId);
+    let previousCount = -1;
+
+    while (
+      messages.length < ctx.config.backfillMaxMessages &&
+      messages.length !== previousCount // sem progresso = fim do histórico disponível
+    ) {
+      const oldest = messages.reduce(
+        (min, m) => Math.min(min, messageTime(m)),
+        Number.POSITIVE_INFINITY,
+      );
+      if (Number.isFinite(oldest) && oldest <= since) break;
+
+      previousCount = messages.length;
+      try {
+        await ctx.client.loadEarlierMessages(chatId as Parameters<Client['loadEarlierMessages']>[0]);
+      } catch (error) {
+        log.debug('loadEarlierMessages parou', { groupId, error: String(error) });
+        break;
+      }
+      messages = await this.safeGetAll(ctx, chatId);
+    }
+
+    if (messages.length >= ctx.config.backfillMaxMessages) {
+      log.warn('teto de mensagens do backfill atingido; histórico pode estar incompleto', {
+        groupId,
+        teto: ctx.config.backfillMaxMessages,
+      });
+    }
+    return messages;
+  }
+
+  private async safeGetAll(
+    ctx: CollectorContext,
+    chatId: Parameters<Client['getAllMessagesInChat']>[0],
+  ): Promise<Message[]> {
+    try {
+      return (await ctx.client.getAllMessagesInChat(chatId, true, false)) ?? [];
+    } catch (error) {
+      log.warn('getAllMessagesInChat falhou', { error: String(error) });
+      return [];
+    }
+  }
+
+  private async emitMessage(
+    ctx: CollectorContext,
+    groupId: string,
+    message: Message,
+    at: number,
+  ): Promise<void> {
+    const authorId = resolveAuthorId(message);
+    const actor = message.fromMe
+      ? ((await ctx.roster.resolveSelf()) ?? (await ctx.roster.resolve(authorId)))
+      : await ctx.roster.resolve(authorId);
+
+    // Coloca na janela do coletor de reações: assim as reações destas
+    // mensagens antigas passam a ser monitoradas daqui para frente.
+    this.window.track(groupId, String(message.id ?? ''), at);
+
+    const payload: MessagePayload = {
+      messageId: String(message.id ?? ''),
+      sentAt: waTimestampToIso(message.timestamp ?? (message as { t?: number }).t),
+      messageType: String(message.type ?? 'unknown'),
+      body: nonEmpty(message.body),
+      caption: nonEmpty(message.caption),
+      isMedia: Boolean(message.isMedia || message.isMMS),
+      mimetype: nonEmpty(message.mimetype),
+      fromMe: Boolean(message.fromMe),
+      quotedMsgId: nonEmpty(message.quotedMsg?.id as string | undefined),
+      mentionedIds: Array.isArray(message.mentionedJidList)
+        ? message.mentionedJidList.map(String)
+        : [],
+      backfill: true,
+    };
+
+    const event: CapturedEvent = {
+      schema: EVENT_SCHEMA_VERSION,
+      eventId: ctx.newEventId(),
+      type: 'message',
+      capturedAt: new Date().toISOString(),
+      group: { id: groupId, name: await ctx.groupName(groupId) },
+      actor,
+      payload,
+    };
+
+    await ctx.emit(event);
+  }
+
+  /** Detecta entradas/saídas ocorridas com o monitor desligado. */
+  private async reconcileParticipants(ctx: CollectorContext, groupId: string): Promise<void> {
+    const participants = await ctx.roster.groupMembers(groupId, true);
+    const diff = ctx.checkpoint.diffParticipants(
+      groupId,
+      participants.map((p) => p.id),
+    );
+
+    if (diff.firstRun || (diff.added.length === 0 && diff.removed.length === 0)) return;
+
+    for (const [action, ids] of [
+      ['add', diff.added],
+      ['remove', diff.removed],
+    ] as const) {
+      if (ids.length === 0) continue;
+
+      const payload: ParticipantsChangedPayload = {
+        action,
+        rawAction: `${action}:detected_on_resume`,
+        who: await ctx.roster.resolveMany(ids),
+        detectedOnResume: true,
+      };
+
+      const event: CapturedEvent = {
+        schema: EVENT_SCHEMA_VERSION,
+        eventId: ctx.newEventId(),
+        type: 'participants_changed',
+        capturedAt: new Date().toISOString(),
+        group: { id: groupId, name: await ctx.groupName(groupId) },
+        // Sem autor: quem executou a ação não é recuperável depois do fato.
+        actor: null,
+        payload,
+      };
+
+      await ctx.emit(event);
+    }
+
+    log.info('participantes reconciliados', {
+      groupId,
+      entraram: diff.added.length,
+      sairam: diff.removed.length,
+    });
+  }
+
+  async stop(): Promise<void> {
+    // Roda uma vez no boot; não há nada em execução para interromper.
+  }
+}
+
+function messageTime(message: Message): number {
+  const raw = message?.timestamp ?? (message as { t?: number })?.t;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return 0;
+  return raw > 1e11 ? raw : raw * 1000;
+}
+
+function resolveAuthorId(message: Message): string | null {
+  const author = (message as { author?: string }).author;
+  if (author) return String(author);
+  const sender = (message as { sender?: { id?: string } }).sender?.id;
+  if (sender) return String(sender);
+  const from = message.from ? String(message.from) : '';
+  return from.endsWith('@g.us') ? null : from || null;
+}
+
+function nonEmpty(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}

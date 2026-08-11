@@ -93,6 +93,23 @@ JSON Lines é o formato de gravação porque o append é atômico e barato: um a
 
 ---
 
+## Histórico e retomada
+
+No boot, antes de escutar ao vivo, o monitor recupera o que perdeu:
+
+- **Primeiro contato com um grupo** — puxa a janela de `BACKFILL_DAYS` dias (7 por padrão).
+- **Retomada** — se o monitor já rodou antes, parte da última mensagem registrada no checkpoint e traz só o que é novo.
+
+Mensagens recuperadas assim vêm com `"backfill": true` no payload, para você distinguir captura retroativa de tempo real. A deduplicação é por `messageId`, então rodar de novo (ou a sobreposição com o listener ao vivo) nunca duplica evento.
+
+**Participantes** também são reconciliados: a lista atual é comparada com a do checkpoint, e quem entrou ou saiu com o monitor desligado vira um `participants_changed` com `"detectedOnResume": true`. Nesses eventos `actor` é `null` e não há horário exato — o WhatsApp não guarda esse rastro para quem não estava escutando.
+
+O estado fica em `data/state/checkpoint.json`.
+
+> **"Todo o histórico" não existe no multi-device.** O WhatsApp só sincroniza uma janela de histórico para aparelhos conectados. O backfill vai até onde o WhatsApp entregou e para — não há como recuperar o grupo inteiro desde a criação. Mensagens que você apagou do celular também não voltam: apagar histórico é irreversível e propaga para os aparelhos conectados.
+
+---
+
 ## Como as reações são capturadas
 
 Na v4 do open-wa o listener nativo `onReaction` exige licença paga (`insiders`). Mas o objeto `Message` já carrega o array `reactions[]` com quem reagiu e com qual emoji, e `getAllMessagesInChat` é livre.
@@ -149,6 +166,9 @@ Tudo em `.env` (veja `.env.example`):
 | `REACTION_WINDOW_SIZE` | `200` | Mensagens recentes por grupo sob vigilância |
 | `REACTION_WINDOW_HOURS` | `48` | Idade máxima de uma mensagem na janela |
 | `ROSTER_TTL_MS` | `900000` | TTL do cache de nomes/números |
+| `BACKFILL_ENABLED` | `true` | Recupera histórico no boot |
+| `BACKFILL_DAYS` | `7` | Janela do primeiro contato com um grupo |
+| `BACKFILL_MAX_MESSAGES` | `5000` | Teto de paginação por grupo |
 | `USER_AGENT` | *(auto)* | UA enviado ao WA Web. Nunca use um com prefixo `WhatsApp/` |
 | `USE_CHROME` | `false` | `true` usa o Chrome do sistema em vez do Chromium do puppeteer |
 | `CHROME_PATH` | — | Caminho explícito de um navegador |

@@ -13,6 +13,7 @@ import type { Client, Contact } from '@open-wa/wa-automate';
 import type { Actor, NameSource, ParticipantSnapshot } from '../types';
 import { chatIdToE164 } from '../util/phone';
 import { createLogger } from '../util/logger';
+import { LidResolver, isLid } from './lid';
 
 const log = createLogger('roster');
 
@@ -56,14 +57,43 @@ export class Roster {
   private readonly contacts = new Map<string, CacheEntry<Actor>>();
   private readonly members = new Map<string, CacheEntry<ParticipantSnapshot[]>>();
 
+  private readonly lids: LidResolver;
+  /** Chat id `@c.us` da conta conectada, para atribuir autoria das próprias mensagens. */
+  private hostId: string | null = null;
+
   constructor(
     private client: Client,
     private readonly ttlMs: number,
-  ) {}
+  ) {
+    this.lids = new LidResolver(client);
+  }
 
   /** Substitui o client após um restart de sessão, preservando o cache. */
   setClient(client: Client): void {
     this.client = client;
+    this.lids.setClient(client);
+  }
+
+  /**
+   * Descobre o número da conta conectada. Mensagens com `fromMe` chegam sem
+   * autor identificável, então sem isto elas sairiam com actor nulo.
+   */
+  async loadHostIdentity(): Promise<void> {
+    try {
+      const raw = await this.client.getHostNumber();
+      const digits = String(raw ?? '').replace(/\D/g, '');
+      if (digits) {
+        this.hostId = `${digits}@c.us`;
+        log.info('conta conectada identificada', { hostId: this.hostId });
+      }
+    } catch (error) {
+      log.warn('getHostNumber falhou; mensagens próprias ficarão sem autor', error);
+    }
+  }
+
+  /** Autor a usar quando a mensagem é da própria conta. */
+  async resolveSelf(): Promise<Actor | null> {
+    return this.hostId ? this.resolve(this.hostId) : null;
   }
 
   /**
@@ -76,17 +106,32 @@ export class Roster {
     const cached = this.contacts.get(contactId);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
 
+    // Autor de mensagem/reação em grupo chega como LID, que não carrega número.
+    // Traduz para @c.us quando possível, mas mantém o id original no evento:
+    // ele é a chave estável, e trocá-la quebraria a deduplicação a posteriori.
+    let phone = chatIdToE164(contactId);
+    let lookupId = contactId;
+    if (!phone && isLid(contactId)) {
+      const mapped = await this.lids.toContactId(contactId);
+      if (mapped) {
+        phone = chatIdToE164(mapped);
+        lookupId = mapped;
+      }
+    }
+
     let actor: Actor = {
       id: contactId,
-      phone: chatIdToE164(contactId),
+      phone,
       name: null,
       nameSource: null,
     };
 
     try {
-      const contact = await this.client.getContact(contactId as Parameters<Client['getContact']>[0]);
+      const contact = await this.client.getContact(lookupId as Parameters<Client['getContact']>[0]);
       const { name, nameSource } = pickName(contact);
       actor = { ...actor, name, nameSource };
+      // O objeto devolvido pode trazer o vínculo que ainda não conhecíamos.
+      this.lids.learnFromContacts([contact]);
     } catch (error) {
       log.debug('getContact falhou, seguindo só com o id', { contactId, error: String(error) });
     }
@@ -104,16 +149,46 @@ export class Roster {
   /**
    * Lista os participantes de um grupo com nome, número e flags de admin.
    * `getGroupMembers` é livre de licença na v4.
+   *
+   * `waitForMembers` cobre o boot: logo depois de a sessão ficar pronta, os
+   * metadados de um grupo grande ainda podem não ter sincronizado, e a chamada
+   * devolve lista vazia — foi o que produziu um group_snapshot com 0
+   * participantes num grupo de 830. Nesse caso vale a pena insistir.
    */
-  async groupMembers(groupId: string): Promise<ParticipantSnapshot[]> {
+  async groupMembers(groupId: string, waitForMembers = false): Promise<ParticipantSnapshot[]> {
     const cached = this.members.get(groupId);
-    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    if (cached && cached.expiresAt > Date.now() && cached.value.length > 0) return cached.value;
 
+    let snapshot = await this.fetchMembers(groupId);
+
+    if (snapshot.length === 0 && waitForMembers) {
+      const delaysMs = [500, 1000, 2000, 4000, 8000];
+      for (const delay of delaysMs) {
+        await sleep(delay);
+        snapshot = await this.fetchMembers(groupId);
+        if (snapshot.length > 0) {
+          log.info('participantes carregaram após espera', { groupId, total: snapshot.length });
+          break;
+        }
+      }
+      if (snapshot.length === 0) {
+        log.warn('grupo continua sem participantes após as tentativas', { groupId });
+      }
+    }
+
+    this.members.set(groupId, { value: snapshot, expiresAt: Date.now() + this.ttlMs });
+    return snapshot;
+  }
+
+  private async fetchMembers(groupId: string): Promise<ParticipantSnapshot[]> {
     let snapshot: ParticipantSnapshot[] = [];
     try {
       const contacts = await this.client.getGroupMembers(
         groupId as Parameters<Client['getGroupMembers']>[0],
       );
+      // Os membros vêm como @c.us e podem carregar o LID correspondente:
+      // é a fonte mais barata de vínculos para os eventos de mensagem.
+      this.lids.learnFromContacts(contacts ?? []);
       snapshot = (contacts ?? []).map((contact) => {
         const id = String(contact?.id ?? '');
         const { name, nameSource } = pickName(contact);
@@ -143,7 +218,7 @@ export class Roster {
       log.warn('getGroupMembers falhou', { groupId, error: String(error) });
     }
 
-    this.members.set(groupId, { value: snapshot, expiresAt: Date.now() + this.ttlMs });
+    // Quem cacheia é groupMembers(); aqui só buscamos.
     return snapshot;
   }
 
@@ -151,4 +226,8 @@ export class Roster {
   invalidateGroup(groupId: string): void {
     this.members.delete(groupId);
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
