@@ -54,20 +54,21 @@ export class BackfillCollector implements Collector {
 
   private async backfillGroup(ctx: CollectorContext, groupId: string): Promise<void> {
     const checkpoint = ctx.checkpoint.get(groupId);
-    const windowStart = Date.now() - ctx.config.backfillDays * 24 * 60 * 60 * 1000;
 
-    // Retomada: parte da última mensagem registrada. Primeiro contato: usa a
-    // janela de dias configurada. O mais recente dos dois evita reler o que já
-    // temos e, ao mesmo tempo, respeita o teto de dias no primeiro run.
-    const since =
-      checkpoint.lastMessageAt !== null
-        ? Math.max(checkpoint.lastMessageAt, windowStart)
-        : windowStart;
+    // A janela é SEMPRE os últimos BACKFILL_DAYS dias, mesmo havendo
+    // checkpoint. Antes ela começava na última mensagem registrada, o que
+    // parecia uma economia — mas amarrava a cobertura ao que já tinha sido
+    // capturado: se uma execução falhasse em ler parte do histórico, o
+    // checkpoint avançava mesmo assim e aquele trecho ficava inalcançável para
+    // sempre. Reler é barato e a deduplicação por messageId garante que nada
+    // seja emitido duas vezes; o checkpoint continua servindo ao dedupe e à
+    // reconciliação de participantes.
+    const since = Date.now() - ctx.config.backfillDays * 24 * 60 * 60 * 1000;
 
     log.info('iniciando backfill', {
       groupId,
       desde: new Date(since).toISOString(),
-      retomada: checkpoint.lastMessageAt !== null,
+      jaRegistradas: checkpoint.emittedMessageIds.length,
     });
 
     const messages = await this.loadUntil(ctx, groupId, since);
@@ -77,11 +78,13 @@ export class BackfillCollector implements Collector {
     }
 
     // Ordem cronológica: o arquivo fica legível e o checkpoint avança certo.
-    messages.sort((a, b) => messageTime(a) - messageTime(b));
+    // Sobre uma cópia — o array veio do cliente e ordenar no lugar mexeria em
+    // estrutura que não é nossa.
+    const ordered = [...messages].sort((a, b) => messageTime(a) - messageTime(b));
 
     let emitted = 0;
     let skipped = 0;
-    for (const message of messages) {
+    for (const message of ordered) {
       const at = messageTime(message);
       if (at < since) continue;
 
@@ -99,8 +102,11 @@ export class BackfillCollector implements Collector {
   }
 
   /**
-   * Pagina o histórico para trás até cobrir `since`, esgotar o que o WhatsApp
-   * sincronizou, ou bater o teto de mensagens.
+   * Carrega o histórico do servidor até cobrir `since`.
+   *
+   * Caminho principal é `loadEarlierMessagesTillDate`, que a própria lib provê
+   * para exatamente isto (e recebe o timestamp em SEGUNDOS). O laço manual fica
+   * só como reserva, caso esse método falhe.
    */
   private async loadUntil(
     ctx: CollectorContext,
@@ -108,28 +114,26 @@ export class BackfillCollector implements Collector {
     since: number,
   ): Promise<Message[]> {
     const chatId = groupId as Parameters<Client['getAllMessagesInChat']>[0];
-    let messages = await this.safeGetAll(ctx, chatId);
-    let previousCount = -1;
 
-    while (
-      messages.length < ctx.config.backfillMaxMessages &&
-      messages.length !== previousCount // sem progresso = fim do histórico disponível
-    ) {
-      const oldest = messages.reduce(
-        (min, m) => Math.min(min, messageTime(m)),
-        Number.POSITIVE_INFINITY,
+    try {
+      await ctx.client.loadEarlierMessagesTillDate(
+        chatId as Parameters<Client['loadEarlierMessagesTillDate']>[0],
+        Math.floor(since / 1000),
       );
-      if (Number.isFinite(oldest) && oldest <= since) break;
-
-      previousCount = messages.length;
-      try {
-        await ctx.client.loadEarlierMessages(chatId as Parameters<Client['loadEarlierMessages']>[0]);
-      } catch (error) {
-        log.debug('loadEarlierMessages parou', { groupId, error: String(error) });
-        break;
-      }
-      messages = await this.safeGetAll(ctx, chatId);
+    } catch (error) {
+      log.warn('loadEarlierMessagesTillDate falhou; caindo para paginação manual', {
+        groupId,
+        error: String(error),
+      });
+      await this.paginateManually(ctx, chatId, since);
     }
+
+    const messages = await this.safeGetAll(ctx, chatId);
+    log.info('histórico carregado', {
+      groupId,
+      mensagensNoStore: messages.length,
+      maisAntiga: describeOldest(messages),
+    });
 
     if (messages.length >= ctx.config.backfillMaxMessages) {
       log.warn('teto de mensagens do backfill atingido; histórico pode estar incompleto', {
@@ -138,6 +142,33 @@ export class BackfillCollector implements Collector {
       });
     }
     return messages;
+  }
+
+  /** Reserva: pagina de 50 em 50 até cobrir `since` ou parar de progredir. */
+  private async paginateManually(
+    ctx: CollectorContext,
+    chatId: Parameters<Client['getAllMessagesInChat']>[0],
+    since: number,
+  ): Promise<void> {
+    let previousCount = -1;
+    let messages = await this.safeGetAll(ctx, chatId);
+
+    while (messages.length < ctx.config.backfillMaxMessages && messages.length !== previousCount) {
+      // Só mensagens com timestamp utilizável entram na conta. Considerar as de
+      // tempo 0 (notificações de sistema, por exemplo) derrubava `oldest` para
+      // zero e encerrava a paginação na primeira volta.
+      const oldest = oldestUsableTime(messages);
+      if (oldest !== null && oldest <= since) break;
+
+      previousCount = messages.length;
+      try {
+        await ctx.client.loadEarlierMessages(chatId as Parameters<Client['loadEarlierMessages']>[0]);
+      } catch (error) {
+        log.debug('loadEarlierMessages parou', { error: String(error) });
+        break;
+      }
+      messages = await this.safeGetAll(ctx, chatId);
+    }
   }
 
   private async safeGetAll(
@@ -249,6 +280,28 @@ function messageTime(message: Message): number {
   const raw = message?.timestamp ?? (message as { t?: number })?.t;
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return 0;
   return raw > 1e11 ? raw : raw * 1000;
+}
+
+/**
+ * Epoch ms da mensagem mais antiga com timestamp utilizável, ou null se
+ * nenhuma tiver.
+ *
+ * Ignorar as de tempo 0 é o ponto central: com elas na conta, um único item
+ * sem timestamp (notificação de sistema, por exemplo) zerava o mínimo e fazia a
+ * paginação concluir que já tinha alcançado o passado.
+ */
+function oldestUsableTime(messages: readonly Message[]): number | null {
+  let oldest: number | null = null;
+  for (const message of messages) {
+    const at = messageTime(message);
+    if (at > 0 && (oldest === null || at < oldest)) oldest = at;
+  }
+  return oldest;
+}
+
+function describeOldest(messages: readonly Message[]): string {
+  const oldest = oldestUsableTime(messages);
+  return oldest === null ? 'nenhuma com timestamp' : new Date(oldest).toISOString();
 }
 
 function resolveAuthorId(message: Message): string | null {

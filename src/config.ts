@@ -40,7 +40,9 @@ const envSchema = z.object({
   EVENTS_FILE: z.string().min(1).default('data/events.jsonl'),
   EVENTS_MAX_BYTES: z.coerce.number().int().positive().default(50 * 1024 * 1024),
   REACTION_POLL_MS: z.coerce.number().int().min(5_000).default(30_000),
-  REACTION_WINDOW_SIZE: z.coerce.number().int().positive().default(200),
+  // Teto de mensagens por grupo sob observação de reações. Alto de propósito:
+  // o custo por ciclo é uma chamada por grupo, independente da janela.
+  REACTION_WINDOW_SIZE: z.coerce.number().int().positive().default(2_000),
   REACTION_WINDOW_HOURS: z.coerce.number().positive().default(48),
   ROSTER_TTL_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
   // --- Backfill do histórico ---
@@ -133,7 +135,15 @@ export function loadConfig(): AppConfig {
     stateDir: resolveFromRoot('data/state'),
     reactionPollMs: env.REACTION_POLL_MS,
     reactionWindowSize: env.REACTION_WINDOW_SIZE,
-    reactionWindowMs: env.REACTION_WINDOW_HOURS * 60 * 60 * 1000,
+    // A janela de reações nunca pode ser mais estreita que a do backfill: uma
+    // mensagem recuperada do histórico precisa permanecer sob observação tempo
+    // suficiente para ter as reações lidas, senão entra e sai da janela sem
+    // nunca ser varrida. Alargar custa pouco — a varredura é uma chamada por
+    // grupo, e a janela só decide quais mensagens são comparadas.
+    reactionWindowMs: Math.max(
+      env.REACTION_WINDOW_HOURS * 60 * 60 * 1000,
+      env.BACKFILL_DAYS * 24 * 60 * 60 * 1000,
+    ),
     rosterTtlMs: env.ROSTER_TTL_MS,
     backfillEnabled: env.BACKFILL_ENABLED,
     backfillDays: env.BACKFILL_DAYS,

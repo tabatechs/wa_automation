@@ -95,12 +95,11 @@ JSON Lines é o formato de gravação porque o append é atômico e barato: um a
 
 ## Histórico e retomada
 
-No boot, antes de escutar ao vivo, o monitor recupera o que perdeu:
+No boot, antes de escutar ao vivo, o monitor varre os últimos `BACKFILL_DAYS` dias (7 por padrão) de cada grupo e emite **apenas o que ainda não foi registrado**.
 
-- **Primeiro contato com um grupo** — puxa a janela de `BACKFILL_DAYS` dias (7 por padrão).
-- **Retomada** — se o monitor já rodou antes, parte da última mensagem registrada no checkpoint e traz só o que é novo.
+A janela é sempre a mesma, mesmo já havendo checkpoint. Fazê-la começar na última mensagem registrada parecia economia, mas amarrava a cobertura ao que já tinha sido capturado: se uma execução falhasse em ler parte do histórico, o checkpoint avançava assim mesmo e aquele trecho ficava inalcançável para sempre. Reler é barato, e a deduplicação por `messageId` garante que nada saia duas vezes.
 
-Mensagens recuperadas assim vêm com `"backfill": true` no payload, para você distinguir captura retroativa de tempo real. A deduplicação é por `messageId`, então rodar de novo (ou a sobreposição com o listener ao vivo) nunca duplica evento.
+Mensagens recuperadas assim vêm com `"backfill": true` no payload, para você distinguir captura retroativa de tempo real.
 
 **Participantes** também são reconciliados: a lista atual é comparada com a do checkpoint, e quem entrou ou saiu com o monitor desligado vira um `participants_changed` com `"detectedOnResume": true`. Nesses eventos `actor` é `null` e não há horário exato — o WhatsApp não guarda esse rastro para quem não estava escutando.
 
@@ -119,7 +118,7 @@ Então um worker relê as mensagens da janela recente a cada `REACTION_POLL_MS` 
 Duas consequências a conhecer:
 
 - Reações aparecem com atraso de até um ciclo de polling (~30 s), não em tempo real.
-- `getAllMessagesInChat` só enxerga o que está carregado no store do WhatsApp Web. Mensagens antigas o bastante para sair da janela de rastreio (`REACTION_WINDOW_SIZE` / `REACTION_WINDOW_HOURS`) deixam de ter suas reações monitoradas.
+- Só mensagens dentro da janela de observação (`REACTION_WINDOW_SIZE` / `REACTION_WINDOW_HOURS`) têm reações monitoradas. A janela nunca é mais estreita que `BACKFILL_DAYS`, para que mensagens recuperadas do histórico também sejam cobertas.
 
 ---
 
@@ -163,8 +162,8 @@ Tudo em `.env` (veja `.env.example`):
 | `EVENTS_FILE` | `data/events.jsonl` | Onde os eventos são gravados |
 | `EVENTS_MAX_BYTES` | `52428800` | Rotaciona o arquivo ao passar deste tamanho |
 | `REACTION_POLL_MS` | `30000` | Intervalo do polling de reações |
-| `REACTION_WINDOW_SIZE` | `200` | Mensagens recentes por grupo sob vigilância |
-| `REACTION_WINDOW_HOURS` | `48` | Idade máxima de uma mensagem na janela |
+| `REACTION_WINDOW_SIZE` | `2000` | Mensagens por grupo sob observação de reações |
+| `REACTION_WINDOW_HOURS` | `48` | Idade máxima na janela; nunca menor que `BACKFILL_DAYS` |
 | `ROSTER_TTL_MS` | `900000` | TTL do cache de nomes/números |
 | `BACKFILL_ENABLED` | `true` | Recupera histórico no boot |
 | `BACKFILL_DAYS` | `7` | Janela do primeiro contato com um grupo |
