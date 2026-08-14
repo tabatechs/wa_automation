@@ -45,6 +45,22 @@ const envSchema = z.object({
   REACTION_WINDOW_SIZE: z.coerce.number().int().positive().default(2_000),
   REACTION_WINDOW_HOURS: z.coerce.number().positive().default(48),
   ROSTER_TTL_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
+  // --- Confirmações de leitura das mensagens próprias ---
+  READ_RECEIPTS_ENABLED: z
+    .string()
+    .default('true')
+    .transform((v) => v.toLowerCase() !== 'false'),
+  // Intervalo alto de propósito: o horário da leitura vem do WhatsApp, não do
+  // momento em que perguntamos, e o número de eventos é o mesmo em qualquer
+  // cadência (um por pessoa por mensagem). Perguntar de minuto em minuto só
+  // multiplicaria consultas na sessão sem melhorar dado nenhum.
+  READ_RECEIPT_POLL_MS: z.coerce.number().int().min(10_000).default(15 * 60 * 1000),
+  // Depois disso a mensagem sai da vigilância. Quem ia ler já leu; continuar
+  // perguntando por mensagens de dias atrás só gasta consulta.
+  READ_RECEIPT_WINDOW_HOURS: z.coerce.number().positive().default(48),
+  // Teto de consultas por ciclo. Aqui o custo é por MENSAGEM, não por grupo
+  // como nas reações — sem teto, um dia movimentado viraria uma rajada.
+  READ_RECEIPT_MAX_PER_CYCLE: z.coerce.number().int().positive().default(40),
   // --- Backfill do histórico ---
   BACKFILL_ENABLED: z
     .string()
@@ -56,6 +72,28 @@ const envSchema = z.object({
   // Teto de segurança: evita paginar indefinidamente num grupo muito ativo.
   BACKFILL_MAX_MESSAGES: z.coerce.number().int().positive().default(5_000),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  // --- MongoDB ---
+  // Sem MONGODB_URI o Mongo simplesmente não sobe e o monitor segue como antes,
+  // gravando só o JSONL. Nada aqui é obrigatório.
+  MONGODB_URI: z.string().optional(),
+  MONGODB_DB: z.string().min(1).default('wa_monitor'),
+  MONGO_ENABLED: z
+    .string()
+    .default('true')
+    .transform((v) => v.toLowerCase() !== 'false'),
+  // Sufixo aplicado a TODAS as coleções. Começa em "_teste" de propósito:
+  // virar produção é esvaziar esta variável, sem tocar em código.
+  MONGO_COLLECTION_SUFFIX: z.string().default('_teste'),
+  MONGO_RAW_LOG: z
+    .string()
+    .default('true')
+    .transform((v) => v.toLowerCase() !== 'false'),
+  // 0 = o log bruto nunca expira. Ver o orçamento de espaço no README.
+  MONGO_RAW_LOG_TTL_DAYS: z.coerce.number().int().min(0).default(0),
+  MONGO_FLUSH_MS: z.coerce.number().int().min(100).default(2_000),
+  MONGO_FLUSH_MAX: z.coerce.number().int().positive().default(200),
+  // Recálculo das métricas caras dentro do monitor. 0 desliga (só sob demanda).
+  METRICS_REFRESH_MS: z.coerce.number().int().min(0).default(5 * 60 * 1000),
 });
 
 const groupEntrySchema = z.object({
@@ -88,6 +126,10 @@ export interface AppConfig {
   reactionWindowSize: number;
   reactionWindowMs: number;
   rosterTtlMs: number;
+  readReceiptsEnabled: boolean;
+  readReceiptPollMs: number;
+  readReceiptWindowMs: number;
+  readReceiptMaxPerCycle: number;
   backfillEnabled: boolean;
   backfillDays: number;
   backfillMaxMessages: number;
@@ -95,6 +137,19 @@ export interface AppConfig {
   groups: MonitoredGroup[];
   /** Ids habilitados, para checagem rápida de whitelist. */
   groupIds: Set<string>;
+  mongo: MongoConfig;
+}
+
+export interface MongoConfig {
+  /** Vazio = Mongo desligado; o monitor grava só o JSONL. */
+  uri: string | null;
+  db: string;
+  collectionSuffix: string;
+  rawLog: boolean;
+  rawLogTtlDays: number;
+  flushMs: number;
+  flushMax: number;
+  metricsRefreshMs: number;
 }
 
 export function loadConfig(): AppConfig {
@@ -145,12 +200,26 @@ export function loadConfig(): AppConfig {
       env.BACKFILL_DAYS * 24 * 60 * 60 * 1000,
     ),
     rosterTtlMs: env.ROSTER_TTL_MS,
+    readReceiptsEnabled: env.READ_RECEIPTS_ENABLED,
+    readReceiptPollMs: env.READ_RECEIPT_POLL_MS,
+    readReceiptWindowMs: env.READ_RECEIPT_WINDOW_HOURS * 60 * 60 * 1000,
+    readReceiptMaxPerCycle: env.READ_RECEIPT_MAX_PER_CYCLE,
     backfillEnabled: env.BACKFILL_ENABLED,
     backfillDays: env.BACKFILL_DAYS,
     backfillMaxMessages: env.BACKFILL_MAX_MESSAGES,
     logLevel: env.LOG_LEVEL,
     groups,
     groupIds: new Set(groups.map((g) => g.id)),
+    mongo: {
+      uri: env.MONGO_ENABLED && env.MONGODB_URI ? env.MONGODB_URI : null,
+      db: env.MONGODB_DB,
+      collectionSuffix: env.MONGO_COLLECTION_SUFFIX,
+      rawLog: env.MONGO_RAW_LOG,
+      rawLogTtlDays: env.MONGO_RAW_LOG_TTL_DAYS,
+      flushMs: env.MONGO_FLUSH_MS,
+      flushMax: env.MONGO_FLUSH_MAX,
+      metricsRefreshMs: env.METRICS_REFRESH_MS,
+    },
   };
 }
 

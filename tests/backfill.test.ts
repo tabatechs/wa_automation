@@ -140,9 +140,30 @@ async function run() {
     assert.strictEqual(h1.emitted.length, 5);
 
     const h2 = makeHarness(dir, historico);
-    await new BackfillCollector(new MessageWindow(2000, 7 * DAY)).start(h2.ctx);
+    // A janela precisa acompanhar o restart: mensagem já emitida não vira
+    // evento de novo, mas volta a ser observada.
+    const janela2 = new MessageWindow(2000, 7 * DAY);
+    await new BackfillCollector(janela2).start(h2.ctx);
     assert.deepStrictEqual(h2.emitted, [], `segunda passada não pode emitir nada`);
     ok('segunda execução não duplica nada (dedupe por messageId)');
+
+    assert.strictEqual(
+      janela2.size(G),
+      5,
+      'sem isto, reações e leituras de mensagens já conhecidas deixam de ser observadas a cada restart',
+    );
+    ok('mensagem já emitida continua vigiada depois do restart');
+
+    // E a marca `fromMe` chega junto: é ela que decide o que o coletor de
+    // confirmações de leitura vigia, e só mensagem própria tem leitura.
+    const proprias: string[] = [];
+    const janela3 = new MessageWindow(2000, 7 * DAY, (_g, id, _at, fromMe) => {
+      if (fromMe) proprias.push(id);
+    });
+    const h4 = makeHarness(dir, [...historico, msg('m7', 30_000, { fromMe: true })]);
+    await new BackfillCollector(janela3).start(h4.ctx);
+    assert.deepStrictEqual(proprias, ['m7'], 'só a mensagem própria entra como fromMe');
+    ok('backfill marca a mensagem própria para a vigilância de leitura');
 
     // Mensagem nova aparece depois: só ela sai.
     const h3 = makeHarness(dir, [...historico, msg('m6', 60_000)]);

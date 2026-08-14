@@ -13,7 +13,7 @@ import type { Client, Contact } from '@open-wa/wa-automate';
 import type { Actor, NameSource, ParticipantSnapshot } from '../types';
 import { chatIdToE164 } from '../util/phone';
 import { createLogger } from '../util/logger';
-import { LidResolver, isLid } from './lid';
+import { LidResolver, isLid, normalizeLid } from './lid';
 
 const log = createLogger('roster');
 
@@ -103,16 +103,21 @@ export class Roster {
   async resolve(contactId: string | null | undefined): Promise<Actor | null> {
     if (!contactId) return null;
 
-    const cached = this.contacts.get(contactId);
+    // O mesmo LID chega ora com sufixo de dispositivo (`...:71@lid`), ora sem.
+    // Normalizar aqui é o que garante que os dois virem UM ator só — sem isso a
+    // mesma pessoa se divide em dois ids e as métricas saem pela metade.
+    const canonicalId = isLid(contactId) ? normalizeLid(contactId) : contactId;
+
+    const cached = this.contacts.get(canonicalId);
     if (cached && cached.expiresAt > Date.now()) return cached.value;
 
     // Autor de mensagem/reação em grupo chega como LID, que não carrega número.
-    // Traduz para @c.us quando possível, mas mantém o id original no evento:
+    // Traduz para @c.us quando possível, mas mantém o LID como id do evento:
     // ele é a chave estável, e trocá-la quebraria a deduplicação a posteriori.
-    let phone = chatIdToE164(contactId);
-    let lookupId = contactId;
-    if (!phone && isLid(contactId)) {
-      const mapped = await this.lids.toContactId(contactId);
+    let phone = chatIdToE164(canonicalId);
+    let lookupId = canonicalId;
+    if (!phone && isLid(canonicalId)) {
+      const mapped = await this.lids.toContactId(canonicalId);
       if (mapped) {
         phone = chatIdToE164(mapped);
         lookupId = mapped;
@@ -120,7 +125,7 @@ export class Roster {
     }
 
     let actor: Actor = {
-      id: contactId,
+      id: canonicalId,
       phone,
       name: null,
       nameSource: null,
@@ -136,7 +141,7 @@ export class Roster {
       log.debug('getContact falhou, seguindo só com o id', { contactId, error: String(error) });
     }
 
-    this.contacts.set(contactId, { value: actor, expiresAt: Date.now() + this.ttlMs });
+    this.contacts.set(canonicalId, { value: actor, expiresAt: Date.now() + this.ttlMs });
     return actor;
   }
 

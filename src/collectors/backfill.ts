@@ -25,6 +25,7 @@ import { EVENT_SCHEMA_VERSION } from '../types';
 import type { CapturedEvent, MessagePayload, ParticipantsChangedPayload } from '../types';
 import { waTimestampToIso } from '../util/phone';
 import { createLogger } from '../util/logger';
+import { HistoryLoader } from '../util/history';
 import type { Collector, CollectorContext } from './Collector';
 import type { MessageWindow } from './messageWindow';
 
@@ -32,6 +33,9 @@ const log = createLogger('collector:backfill');
 
 export class BackfillCollector implements Collector {
   readonly name = 'backfill';
+
+  /** Criado no primeiro uso: precisa do client, que só existe no start. */
+  private loader: HistoryLoader | null = null;
 
   constructor(private readonly window: MessageWindow) {}
 
@@ -89,6 +93,14 @@ export class BackfillCollector implements Collector {
       if (at < since) continue;
 
       const messageId = String(message?.id ?? '');
+
+      // A janela é povoada ANTES do dedupe, de propósito. Uma mensagem já
+      // emitida numa execução anterior não pode virar evento de novo — mas
+      // precisa voltar a ser observada para reações e confirmações de leitura.
+      // Fazendo isso só depois do dedupe, tudo que já era conhecido saía da
+      // observação a cada restart, e só o inédito continuava vigiado.
+      this.window.track(groupId, messageId, at, Boolean(message.fromMe));
+
       if (!ctx.checkpoint.markMessageEmitted(groupId, messageId, at)) {
         skipped += 1;
         continue;
@@ -104,9 +116,12 @@ export class BackfillCollector implements Collector {
   /**
    * Carrega o histórico do servidor até cobrir `since`.
    *
-   * Caminho principal é `loadEarlierMessagesTillDate`, que a própria lib provê
-   * para exatamente isto (e recebe o timestamp em SEGUNDOS). O laço manual fica
-   * só como reserva, caso esse método falhe.
+   * O caminho principal é o `HistoryLoader`, que fala com o store do WA Web
+   * direto. As funções da lib (`loadEarlierMessagesTillDate` /
+   * `loadEarlierMessages`) ficam como última alternativa: as duas terminam em
+   * `chat.loadEarlierMsgs()`, que quebrou na build atual do WhatsApp Web — e
+   * como a antiga "paginação manual" chamava exatamente essa função, a reserva
+   * morria junto com o caminho principal, em silêncio.
    */
   private async loadUntil(
     ctx: CollectorContext,
@@ -115,17 +130,27 @@ export class BackfillCollector implements Collector {
   ): Promise<Message[]> {
     const chatId = groupId as Parameters<Client['getAllMessagesInChat']>[0];
 
-    try {
-      await ctx.client.loadEarlierMessagesTillDate(
-        chatId as Parameters<Client['loadEarlierMessagesTillDate']>[0],
-        Math.floor(since / 1000),
-      );
-    } catch (error) {
-      log.warn('loadEarlierMessagesTillDate falhou; caindo para paginação manual', {
-        groupId,
-        error: String(error),
-      });
-      await this.paginateManually(ctx, chatId, since);
+    this.loader ??= new HistoryLoader(ctx.client);
+    // Cada passo traz ~50 mensagens; o teto de passos respeita o de mensagens.
+    const maxSteps = Math.max(1, Math.ceil(ctx.config.backfillMaxMessages / 50));
+    const resultado = await this.loader.loadUntil(groupId, since, maxSteps);
+
+    if (!resultado.ok) {
+      // Caminhos da lib como reserva. Nesta build do WA Web os dois terminam em
+      // `chat.loadEarlierMsgs()` e falham junto, mas cobrem builds mais antigas
+      // — e a paginação manual é o que o commit da regressão deixou testado.
+      try {
+        await ctx.client.loadEarlierMessagesTillDate(
+          chatId as Parameters<Client['loadEarlierMessagesTillDate']>[0],
+          Math.floor(since / 1000),
+        );
+      } catch (error) {
+        log.warn('loadEarlierMessagesTillDate falhou; caindo para paginação manual', {
+          groupId,
+          error: String(error),
+        });
+        await this.paginateManually(ctx, chatId, since);
+      }
     }
 
     const messages = await this.safeGetAll(ctx, chatId);
@@ -133,7 +158,37 @@ export class BackfillCollector implements Collector {
       groupId,
       mensagensNoStore: messages.length,
       maisAntiga: describeOldest(messages),
+      rota: resultado.route,
+      passos: resultado.steps,
+      cobriuAJanela: resultado.covered,
     });
+
+    // O alarme olha o que temos de fato, não o que a rota disse ter feito: o
+    // store pode já estar quente por outro motivo. Antes isto falhava calado —
+    // `mensagensNoStore: 1` num grupo ativo parecia linha de rotina, e é o
+    // sintoma mais importante que o monitor pode dar. Sem histórico, um
+    // reinício perde tudo que aconteceu no intervalo.
+    const oldest = oldestUsableTime(messages);
+    const cobriu = oldest !== null && oldest <= since;
+
+    if (messages.length <= 1) {
+      log.error(
+        'HISTÓRICO NÃO CARREGOU — o monitor vai capturar apenas o que chegar ao vivo, ' +
+          'e um reinício perderá o intervalo',
+        { groupId, mensagensNoStore: messages.length, rota: resultado.route },
+      );
+    } else if (!resultado.ok) {
+      log.warn('não foi possível paginar; seguindo com o que já estava no store', {
+        groupId,
+        mensagensNoStore: messages.length,
+      });
+    } else if (!cobriu) {
+      log.warn('histórico não cobriu a janela inteira; o WhatsApp entregou só até onde tinha', {
+        groupId,
+        desde: new Date(since).toISOString(),
+        maisAntiga: describeOldest(messages),
+      });
+    }
 
     if (messages.length >= ctx.config.backfillMaxMessages) {
       log.warn('teto de mensagens do backfill atingido; histórico pode estar incompleto', {
@@ -144,7 +199,13 @@ export class BackfillCollector implements Collector {
     return messages;
   }
 
-  /** Reserva: pagina de 50 em 50 até cobrir `since` ou parar de progredir. */
+  /**
+   * Última reserva: pagina de 50 em 50 até cobrir `since` ou parar de progredir.
+   *
+   * Continua aqui mesmo com o `HistoryLoader` na frente porque é o caminho que
+   * o commit da regressão de paginação deixou coberto por teste — e porque numa
+   * build antiga do WA Web ele ainda é o que funciona.
+   */
   private async paginateManually(
     ctx: CollectorContext,
     chatId: Parameters<Client['getAllMessagesInChat']>[0],
@@ -194,9 +255,7 @@ export class BackfillCollector implements Collector {
       ? ((await ctx.roster.resolveSelf()) ?? (await ctx.roster.resolve(authorId)))
       : await ctx.roster.resolve(authorId);
 
-    // Coloca na janela do coletor de reações: assim as reações destas
-    // mensagens antigas passam a ser monitoradas daqui para frente.
-    this.window.track(groupId, String(message.id ?? ''), at);
+    // A entrada na janela acontece no laço de `backfillGroup`, antes do dedupe.
 
     const payload: MessagePayload = {
       messageId: String(message.id ?? ''),

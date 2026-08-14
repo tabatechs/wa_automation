@@ -12,6 +12,7 @@ export type EventType =
   | 'message'
   | 'reaction_added'
   | 'reaction_removed'
+  | 'message_read'
   | 'participants_changed'
   | 'group_snapshot'
   | 'session_state';
@@ -74,6 +75,24 @@ export interface ReactionPayload {
   reactedAt: string | null;
 }
 
+/** De onde a confirmação de leitura foi lida. Só para depuração. */
+export type ReadReceiptSource = 'store-cache' | 'store-query' | 'getMessageInfo' | 'getMessageReaders';
+
+/**
+ * Uma pessoa abriu uma mensagem enviada pela PRÓPRIA conta.
+ *
+ * O WhatsApp só entrega confirmação de leitura a quem enviou, então isto existe
+ * exclusivamente para mensagens `fromMe` — as que você escreve à mão pelo
+ * celular no grupo. O monitor continua sem enviar nada.
+ */
+export interface MessageReadPayload {
+  /** A mensagem própria que foi lida. */
+  targetMessageId: string;
+  /** Quando a pessoa leu (ISO 8601), quando o WhatsApp informa o horário. */
+  readAt: string | null;
+  source: ReadReceiptSource;
+}
+
 export type ParticipantAction = 'add' | 'remove' | 'promote' | 'demote' | 'leave' | 'unknown';
 
 export interface ParticipantsChangedPayload {
@@ -114,6 +133,7 @@ export type CapturedEvent =
   | (BaseEvent & { type: 'message'; payload: MessagePayload })
   | (BaseEvent & { type: 'reaction_added'; payload: ReactionPayload })
   | (BaseEvent & { type: 'reaction_removed'; payload: ReactionPayload })
+  | (BaseEvent & { type: 'message_read'; payload: MessageReadPayload })
   | (BaseEvent & { type: 'participants_changed'; payload: ParticipantsChangedPayload })
   | (BaseEvent & { type: 'group_snapshot'; payload: GroupSnapshotPayload })
   | (BaseEvent & { type: 'session_state'; payload: SessionStatePayload });

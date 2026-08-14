@@ -20,6 +20,7 @@
 
 import type { Client } from '@open-wa/wa-automate';
 import { createLogger } from '../util/logger';
+import { preparePage } from '../util/page';
 
 const log = createLogger('lid');
 
@@ -128,6 +129,14 @@ export class LidResolver {
       page = this.client.getPage();
       if (!page) return null;
     } catch {
+      this.storeUnavailable = true;
+      return null;
+    }
+
+    // Sem isto, o `evaluate` abaixo morre com "__name is not defined" — as
+    // funções aninhadas aqui dentro chegam ao browser com o helper do esbuild
+    // que só existe no processo Node. Ver src/util/page.ts.
+    if (!(await preparePage(page))) {
       this.storeUnavailable = true;
       return null;
     }

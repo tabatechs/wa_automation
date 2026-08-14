@@ -12,7 +12,13 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx tests/run.ts",
     "list-groups": "tsx src/scripts/list-groups.ts",
-    "compact": "tsx src/scripts/compact.ts"
+    "compact": "tsx src/scripts/compact.ts",
+    "mongo:import": "tsx src/scripts/import-jsonl.ts",
+    "mongo:build": "tsx src/scripts/build-metrics.ts",
+    "mongo:size": "tsx src/scripts/mongo-size.ts",
+    "probe-polls": "tsx src/scripts/probe-polls.ts",
+    "probe-reads": "tsx src/scripts/probe-reads.ts",
+    "probe-history": "tsx src/scripts/probe-history.ts"
   },
   "engines": {
     "node": ">=20"
@@ -20,6 +26,7 @@
   "dependencies": {
     "@open-wa/wa-automate": "4.76.0",
     "dotenv": "^16.4.7",
+    "mongodb": "^7.5.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {

@@ -11,11 +11,15 @@ import { loadConfig, type AppConfig } from './config';
 import { startSession, stopSession } from './session';
 import { Roster } from './enrich/roster';
 import { JsonlSink } from './sink/JsonlSink';
+import { MongoSink } from './sink/MongoSink';
+import { MultiSink } from './sink/MultiSink';
 import type { Sink } from './sink/Sink';
+import { MetricsScheduler } from './mongo/scheduler';
 import { MessageWindow } from './collectors/messageWindow';
 import { MessagesCollector } from './collectors/messages';
 import { ParticipantsCollector } from './collectors/participants';
 import { ReactionsCollector } from './collectors/reactions';
+import { ReadReceiptsCollector } from './collectors/readReceipts';
 import { BackfillCollector } from './collectors/backfill';
 import { CheckpointStore } from './state/checkpoint';
 import { emitGroupSnapshot } from './collectors/groupSnapshot';
@@ -38,22 +42,44 @@ async function main(): Promise<void> {
     log.info('grupos monitorados', config.groups.map((g) => g.label ?? g.id));
   }
 
-  const sink: Sink = new JsonlSink({
+  // O JSONL é sempre o destino durável; o Mongo entra ao lado quando há URI.
+  // Se o banco cair, o arquivo continua completo e `mongo:import` recupera.
+  const jsonl = new JsonlSink({
     filePath: config.eventsFile,
     maxBytes: config.eventsMaxBytes,
   });
+  const mongoSink = config.mongo.uri ? new MongoSink(config.mongo) : null;
+  const sink: Sink = mongoSink ? new MultiSink([jsonl, mongoSink]) : jsonl;
+  if (mongoSink) {
+    log.info('MongoDB habilitado', {
+      db: config.mongo.db,
+      sufixo: config.mongo.collectionSuffix || '(produção)',
+      logBruto: config.mongo.rawLog,
+    });
+  }
+
+  // Métricas caras (percentis, concentração, tendências) fora do caminho quente.
+  const metrics = new MetricsScheduler(config.mongo);
 
   // A janela avisa o coletor de reações sobre cada mensagem nova, e o coletor lê
   // a janela a cada varredura. A referência diferida quebra esse ciclo sem
   // precisar mexer na visibilidade dos campos.
   let reactions: ReactionsCollector | null = null;
+  let reads: ReadReceiptsCollector | null = null;
   const window = new MessageWindow(
     config.reactionWindowSize,
     config.reactionWindowMs,
-    (groupId, messageId, at) => reactions?.noteLiveMessage(groupId, messageId, at),
+    (groupId, messageId, at, fromMe) => {
+      reactions?.noteLiveMessage(groupId, messageId, at);
+      // Só mensagem própria tem confirmação de leitura — o WhatsApp não conta
+      // quem leu a mensagem dos outros.
+      if (fromMe) reads?.noteOwnMessage(groupId, messageId, at);
+    },
   );
   const reactionsCollector = new ReactionsCollector(window, config.stateDir);
   reactions = reactionsCollector;
+  const readReceiptsCollector = new ReadReceiptsCollector(config.stateDir);
+  reads = readReceiptsCollector;
 
   const checkpoint = new CheckpointStore(config.stateDir);
 
@@ -66,6 +92,9 @@ async function main(): Promise<void> {
     new ParticipantsCollector(),
     new BackfillCollector(window),
     reactionsCollector,
+    // Depois do backfill: as mensagens próprias do histórico recente já entraram
+    // na janela e são vigiadas desde a primeira varredura.
+    readReceiptsCollector,
   ];
 
   let shuttingDown = false;
@@ -91,6 +120,7 @@ async function main(): Promise<void> {
   });
 
   await wire(client);
+  metrics.start();
   log.info('monitor ativo — Ctrl+C para encerrar');
 
   const shutdown = async (signal: string): Promise<void> => {
@@ -104,6 +134,8 @@ async function main(): Promise<void> {
     // execução capturar só o que aconteceu no intervalo.
     checkpoint.save();
     await stopSession(client);
+    await metrics.stop();
+    // Fecha o sink por último: é ele que drena o que ainda está em buffer.
     await sink.close();
     process.exit(0);
   };

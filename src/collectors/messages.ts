@@ -56,8 +56,9 @@ export class MessagesCollector implements Collector {
       return;
     }
 
-    // Registra na janela para o coletor de reações vigiar esta mensagem.
-    this.window.track(groupId, messageId, at);
+    // Registra na janela para o coletor de reações vigiar esta mensagem — e,
+    // se ela for da própria conta, para o coletor de leituras também.
+    this.window.track(groupId, messageId, at, Boolean(message.fromMe));
 
     const payload: MessagePayload = {
       messageId,

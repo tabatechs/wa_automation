@@ -122,6 +122,226 @@ Duas consequências a conhecer:
 
 ---
 
+## Quem leu as mensagens que você enviou
+
+O WhatsApp só entrega confirmação de leitura a **quem enviou**. Não existe forma de saber quem leu a mensagem de outra pessoa — nem pela API, nem pelo store, nem no aplicativo. Então este recurso cobre exatamente um caso: as mensagens que **você** escreve à mão pelo celular nos grupos monitorados. O monitor continua sem enviar nada.
+
+Dentro desse escopo o sinal é forte, porque **em grupo a confirmação de leitura é sempre enviada**, independentemente da configuração de privacidade de quem lê (ao contrário da conversa individual). Quem abre suas mensagens e nunca responde é justamente o apoiador que os outros indicadores não enxergam.
+
+Como funciona: cada mensagem própria entra numa lista de vigiadas e, a cada `READ_RECEIPT_POLL_MS`, o monitor lê os "dados da mensagem" — a mesma informação da tela de mesmo nome no WhatsApp Web. Cada leitor inédito vira um evento `message_read`. O estado fica em `data/state/read-receipts.json`, então reiniciar não reemite leituras antigas. A mensagem sai da vigilância quando todo mundo já leu ou quando passa de `READ_RECEIPT_WINDOW_HOURS`.
+
+Três coisas a conhecer:
+
+- **O custo é por mensagem**, não por grupo como nas reações — daí o teto `READ_RECEIPT_MAX_PER_CYCLE` e o intervalo folgado de 15 min. O número de eventos é o mesmo em qualquer cadência (um por pessoa por mensagem, uma vez só); varrer mais rápido não descobre mais gente, só gasta mais consulta na sessão. E o horário gravado é o do WhatsApp, não o da varredura.
+- **A disponibilidade depende da sessão.** `getMessageInfo` é `insiders` (pago) e `getMessageReaders` não está no bundle do open-wa; a via principal é o store do WhatsApp Web. Rode `npm run probe-reads` para o veredito na sua sessão. Se nenhuma via funcionar, o coletor se desliga sozinho e o resto do monitor segue igual.
+- **Ler não é falar.** A leitura entra em `messagesRead` e mexe em `lastSeenAt`, nunca em `lastMessageAt` — quem só lê não pode aparecer como quem conversa. Pelo mesmo motivo, `messagesRead` **não** entra no `engagementScore`: o denominador seria enganoso, já que só as mensagens próprias emitidas dentro da janela têm esse dado.
+
+---
+
+## MongoDB: métricas de engajamento
+
+O JSONL responde "o que aconteceu". Para responder **"quem são os apoiadores
+mais engajados"** — que é a pergunta que motiva o projeto — os eventos também
+vão para um MongoDB, que mantém duas coleções de leitura.
+
+Basta preencher `MONGODB_URI` no `.env`. Sem ela, o monitor roda exatamente
+como antes, gravando só o arquivo.
+
+```bash
+npm run mongo:import   # carrega o JSONL que já existe (pode rodar quantas vezes quiser)
+npm run mongo:build    # recalcula as métricas derivadas
+npm run mongo:size     # quanto do plano gratuito já foi usado
+```
+
+O JSONL **continua sendo o log durável**. Se o Mongo cair, o monitor segue
+gravando em disco e `mongo:import` recupera o intervalo depois.
+
+### As coleções
+
+Todas nascem com o sufixo `MONGO_COLLECTION_SUFFIX` (`_teste` por padrão).
+Enquanto ele tiver valor, nada encosta em coleções de produção; para valer,
+esvazie a variável.
+
+| Coleção | Um documento é | Para quê |
+|---|---|---|
+| **`people`** | uma pessoa | **a coleção principal** — quem engaja, quanto e como |
+| **`groups`** | um grupo | saúde e composição do grupo |
+| `activity_daily` | grupo × pessoa × dia | a série temporal |
+| `messages` | uma mensagem | fonte dos recálculos |
+| `reactions` | uma reação | estado atual (`active`), não histórico |
+| `member_events` | uma entrada/saída/promoção | histórico de composição |
+| `message_reads` | uma pessoa que abriu uma mensagem **sua** | quem lê sem responder |
+| `poll_votes` | um voto em enquete | ver a seção de enquetes |
+| `events` | um evento cru | cópia do JSONL; opcional |
+
+**Reimportar não duplica nem infla contador.** Todo `_id` é derivado do
+conteúdo (o `eventId` é um UUID novo a cada emissão e não serviria), e no
+caminho quente um contador só é incrementado quando o documento acabou de ser
+criado. Rodar `mongo:import` cinco vezes dá o mesmo resultado que rodar uma.
+
+### Como uma pessoa é identificada
+
+Este é o ponto que mais afeta a qualidade dos números. O WhatsApp entrega a
+mesma pessoa por dois caminhos:
+
+| origem | id |
+|---|---|
+| mensagens e reações | `146926720831515@lid` |
+| lista de participantes | `5511988812345@c.us` |
+
+Sem unificar, cada apoiador vira dois documentos e as métricas saem pela
+metade. Por isso o `_id` de `people` é o **telefone** (`5511988812345`), e todos
+os ids do WhatsApp ficam em `aliases[]`. Quando o telefone ainda não é
+conhecido, a pessoa recebe um `_id` provisório `lid:<id>`, e o recálculo funde
+os dois assim que o vínculo aparece.
+
+Números brasileiros ganham `ddd`; qualquer outro país é apenas marcado com
+`isInternational` — códigos de país têm de 1 a 3 dígitos e não dá para separá-los
+com segurança sem uma tabela de prefixos, então não se tenta.
+
+### O que tem em `people`
+
+Prioridade nas métricas cruas; os scores existem só para dar uma ordenação
+padrão.
+
+- **Volume** — `messagesSent`, `mediaSent`, `charsSent`, `linksShared`
+- **Conversa** — `repliesSent`, `repliesReceived`, `mentionsMade`,
+  `mentionsReceived`
+- **Reações** — `reactionsGiven`, `reactionsReceived`, `emojisUsed`,
+  `distinctPeopleWhoReacted`, `distinctPeopleReactedTo` (alcance na rede, que é
+  diferente de volume)
+- **Leitura** — `messagesRead`: quantas mensagens **suas** a pessoa abriu (ver a
+  seção sobre confirmação de leitura). Fora do `engagementScore` de propósito
+- **Ritmo** — `activeDays`, `activeDaysLast30`, `currentStreakDays`,
+  `longestStreakDays`, `daysSinceLastMessage`, `hourHistogram`,
+  `weekdayHistogram`
+- **Taxas** — `reactionsReceivedPerMessage` (ressonância),
+  `repliesReceivedPerMessage`, `messagesPerActiveDay`
+- **Tendência** — `messagesLast7d`, `messagesPrev7d`, `trend7d`
+- **Participação** — `groups[]` com contadores por grupo, `groupCount`,
+  `activeGroupCount`
+- **Sinalizadores** — `isLurker` (é membro e nunca falou), `isDormant`,
+  `isObserver` (fala pouco mas reage), `isAdminSomewhere`, `isMultiGroup`
+- **Ordenação** — `engagementScore` (0–100) e `tier`
+
+O `engagementScore` é um **percentil**, não um valor absoluto: 40 mensagens num
+grupo de 20 pessoas não significam o mesmo que num de 800. Assim, 90 quer dizer
+sempre "está entre os 10% mais engajados". A fórmula pondera volume (35%),
+consistência (30%), ressonância (20%) e recência (15%) — os pesos e os cortes de
+faixa estão todos em `src/mongo/scoring.ts`, num objeto só, para mudar sem
+tocar em pipeline.
+
+`tier` é `champion` · `active` · `occasional` · `observer` · `lurker` ·
+`dormant`. Os três últimos vêm antes do score de propósito: para decidir um
+convite, "nunca escreveu mas reage em tudo" e "era campeão e sumiu há dois
+meses" dizem mais que a posição no ranking.
+
+### O que tem em `groups`
+
+Além de `participants[]`, `memberCount`, `joins`/`leaves` e os totais:
+
+- `participationRate` e `silentMemberCount` — a diferença entre um grupo de 800
+  pessoas e um grupo com 800 pessoas conversando
+- `reactionRate`, `replyRate`, `avgReactionsPerMessage`
+- `top10SharePct` e `giniMessages` — concentração: a conversa é de todos ou de
+  meia dúzia?
+- `topPosters`, `topReactors`, `topReceivers`
+- `peakHours` — quando vale a pena mandar um convite
+- `dddDistribution` — orienta convite para evento regional
+- `trend7d`, `daysSinceLastMessage`
+
+### Consultas típicas
+
+```js
+// Os 50 apoiadores mais engajados, com o que sustenta o número
+db.people_teste.find({ tier: { $in: ['champion', 'active'] } })
+  .sort({ engagementScore: -1 }).limit(50)
+  .project({ name: 1, phone: 1, ddd: 1, engagementScore: 1, tier: 1,
+             messagesSent: 1, reactionsReceived: 1, activeDaysLast30: 1 })
+
+// Quem está esquentando agora — costuma valer mais que quem já foi ativo
+db.people_teste.find({ trend7d: 'rising', messagesLast7d: { $gte: 5 } })
+  .sort({ messagesLast7d: -1 })
+
+// Membros silenciosos de um grupo: invisíveis nas contagens, mas alcançáveis
+db.people_teste.find({ isLurker: true, 'groups.groupId': '1203...@g.us' })
+
+// Quem repercute sem falar muito — o "observador" que vale um convite
+db.people_teste.find({ isObserver: true, reactionsGiven: { $gte: 10 } })
+
+// Série de mensagens por dia de um grupo
+db.activity_daily_teste.find({ groupId: '1203...@g.us', personId: null })
+  .sort({ date: 1 })
+```
+
+### Orçamento de espaço no plano gratuito
+
+O M0 do Atlas dá **512 MB**, contando dados **e** índices. Com o texto completo
+das mensagens gravado, o custo medido em disco fica em torno de:
+
+| | com log bruto | só coleções de domínio |
+|---|---|---|
+| mensagem | ~1,0 KB | ~0,55 KB |
+| reação | ~0,5 KB | ~0,25 KB |
+| leitura | — (fora do log bruto) | ~0,4 KB |
+
+Na prática, o teto é **~6.000 mensagens/dia** com o log bruto ligado e
+**~11.000/dia** sem ele. Abaixo de ~3.000/dia o log bruto é confortável.
+
+Duas decisões que já economizam bastante:
+
+- **Snapshots de grupo não são gravados.** Eram o maior sorvedouro: um grupo de
+  830 membros dá ~100 KB por snapshot, e sai um a cada mudança de participante —
+  ~2 MB/dia num único grupo, mais que todas as mensagens juntas. O evento
+  continua sendo processado para atualizar a composição do grupo e resolver
+  telefones; só não vira documento histórico. O JSONL local guarda tudo.
+- **Confirmações de leitura também ficam fora do log bruto.** É o evento de
+  maior cardinalidade do projeto: uma mensagem sua num grupo de 250 pessoas
+  gera até 250 deles, contra 1 de mensagem e um punhado de reações. E, ao
+  contrário de uma mensagem, não há conteúdo a preservar — o documento em
+  `message_reads` já é tudo que existe. Contando 5 mensagens suas por dia com
+  ~150 leitores cada, dá ~9 MB/mês; com log bruto seriam ~22 MB.
+- O índice de `quotedMsgId` é esparso, já que a maioria das mensagens não cita
+  ninguém e o id do WhatsApp tem ~80 caracteres.
+
+Se apertar: `MONGO_RAW_LOG=false` desliga o log bruto (~45% do espaço), e
+`MONGO_RAW_LOG_TTL_DAYS=90` descarta automaticamente o que passar de 90 dias.
+Rode `npm run mongo:size` para ver o consumo real e a data projetada em que o
+teto é atingido.
+
+### Enquetes: votos não são capturáveis
+
+Investigado com sessão real em 13/08/2026 (`npm run probe-polls`). **Quem votou
+não dá para saber**, e a limitação é do WhatsApp, não do código.
+
+O que o diagnóstico encontrou no store do WhatsApp Web, na mensagem da enquete:
+
+```
+__x_pollName                   "Sábado que horas"
+__x_pollOptions                array(3)
+__x_pollVotesSnapshot          { "pollVotes": [] }     <- vazio
+Store.PollVote                 0 modelos (só getByMsgKey, sem loader)
+```
+
+A estrutura dos votos existe e está **vazia**. Votos de enquete são
+criptografados ponta a ponta e decifrados pelo aparelho principal; um aparelho
+conectado recebe o invólucro, não o conteúdo. Um voto emitido ao vivo, com a
+sessão no ar, também não populou nada. `client.getPollData` do open-wa, além
+disso, lança dentro do próprio JS do WhatsApp Web (`getAlternateMsgKey`) — a
+implementação vem de um patch remoto e está quebrada, mas isso é secundário:
+mesmo funcionando, não haveria voto para ler.
+
+Consequência: **`pollVotesCast` e `pollResponseRate` ficam sempre nulos.**
+
+O que continua legível é a **criação** da enquete — autor, data, pergunta e
+opções. Como sinal de mobilização isso não é pouco: quem cria enquete costuma
+ser quem organiza. É o que alimenta `pollsCreated` e `groups.totalPolls`.
+
+Rode `npm run probe-polls` de novo se algum dia o WhatsApp mudar isso; o
+diagnóstico é somente leitura e repetível.
+
+---
+
 ## Privacidade
 
 **Nada sai da sua máquina.** As conexões de saída em operação normal são apenas para `web.whatsapp.com`, que é inerente ao funcionamento do WhatsApp Web.
@@ -172,6 +392,13 @@ Tudo em `.env` (veja `.env.example`):
 | `USE_CHROME` | `false` | `true` usa o Chrome do sistema em vez do Chromium do puppeteer |
 | `CHROME_PATH` | — | Caminho explícito de um navegador |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
+| `MONGODB_URI` | — | Vazio = Mongo desligado, grava só o JSONL. Contém senha: só no `.env` |
+| `MONGODB_DB` | `wa_monitor` | Banco de destino |
+| `MONGO_COLLECTION_SUFFIX` | `_teste` | Sufixo de todas as coleções. Esvazie para produção |
+| `MONGO_RAW_LOG` | `true` | Grava também o log bruto (snapshots ficam de fora) |
+| `MONGO_RAW_LOG_TTL_DAYS` | `0` | `0` = nunca expira; `90` descarta log com mais de 90 dias |
+| `MONGO_FLUSH_MS` / `MONGO_FLUSH_MAX` | `2000` / `200` | Janela e tamanho do lote de escrita |
+| `METRICS_REFRESH_MS` | `300000` | Recálculo dentro do monitor; `0` = só sob demanda |
 
 ## Scripts
 
@@ -181,6 +408,11 @@ Tudo em `.env` (veja `.env.example`):
 | `npm run build` && `npm start` | Compila e roda a versão compilada |
 | `npm run list-groups` | Lista os grupos da conta com seus ids |
 | `npm run compact` | Converte o JSONL num array `.json` |
+| `npm run mongo:import` | Carrega o JSONL no MongoDB; idempotente |
+| `npm run mongo:build` | Recalcula as métricas; `-- --full` reconta tudo do zero |
+| `npm run mongo:size` | Uso do cluster vs. os 512 MB do plano gratuito |
+| `npm run probe-polls` | Verifica se enquetes são capturáveis nesta sessão |
+| `npm run probe-reads` | Verifica se dá para saber quem leu suas mensagens |
 | `npm test` | Suíte de testes (não precisa de sessão nem de rede) |
 | `npm run typecheck` | Checagem de tipos |
 
@@ -192,11 +424,15 @@ src/
 ├─ config.ts             .env + config/groups.json validados com zod
 ├─ session.ts            wrapper do create() do open-wa
 ├─ types.ts              contrato dos eventos
-├─ sink/                 destino dos eventos (JSONL hoje, plugável)
-├─ collectors/           messages, participants, reactions
-├─ enrich/roster.ts      resolve nome/número com cache por TTL
-└─ util/                 logger e conversões de id/timestamp
+├─ sink/                 destinos: JSONL (durável), Mongo, e o fan-out
+├─ collectors/           messages, participants, reactions, readReceipts, backfill
+├─ mongo/                ingestão, recálculo, identidade e pesos do score
+├─ enrich/               roster (nome/número), ponte LID→@c.us, dados da mensagem
+└─ util/                 logger, conversões de id/timestamp e buckets de tempo
 ```
+
+Coletores e sink são desacoplados por interface: o `MultiSink` escreve no
+arquivo e no banco ao mesmo tempo, e a falha de um destino não impede o outro.
 
 Coletores e sink são desacoplados por interface: trocar o destino (Postgres, S3) ou a fonte não obriga a mexer no resto.
 
