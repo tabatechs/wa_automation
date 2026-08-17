@@ -20,7 +20,7 @@
 
 import type { Db, Document } from 'mongodb';
 import { createLogger } from '../util/logger';
-import { dateKeyDaysAgo, daysBetween } from '../util/time';
+import { dateKey, dateKeyDaysAgo, daysBetween, TIMEZONE } from '../util/time';
 import { PENDING_PREFIX } from './identity';
 import { SCORING, tierOf } from './scoring';
 import type { MongoStore } from './client';
@@ -34,7 +34,10 @@ import {
 
 const log = createLogger('mongo:metrics');
 
-const TZ = 'America/Sao_Paulo';
+// Mesmo fuso dos buckets calculados no Node: o `$dateToString` do Mongo e o
+// `timeParts` do ingest precisam concordar, senão a mesma série sai partida
+// em dois dias diferentes conforme quem a escreveu.
+const TZ = TIMEZONE;
 
 export interface RefreshStats {
   merged: number;
@@ -1221,10 +1224,12 @@ export function streakOf(sortedDates: string[]): { current: number; longest: num
 
   // A sequência atual só conta se chega até hoje ou ontem — uma sequência que
   // terminou há duas semanas não diz nada sobre engajamento agora.
+  // "Hoje" precisa ser o dia de São Paulo, como as chaves da série: entre 21h e
+  // meia-noite — o horário de pico dos grupos — em UTC já é o dia seguinte, e
+  // uma sequência viva era contada como interrompida.
   const last = sortedDates[sortedDates.length - 1];
-  const today = new Date();
   const gapToToday = last
-    ? daysBetween(new Date(`${last}T00:00:00Z`), new Date(today.toISOString().slice(0, 10) + 'T00:00:00Z'))
+    ? daysBetween(new Date(`${last}T00:00:00Z`), new Date(`${dateKey()}T00:00:00Z`))
     : Infinity;
 
   return { current: gapToToday <= 1 ? run : 0, longest };

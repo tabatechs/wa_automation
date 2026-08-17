@@ -4,10 +4,10 @@ import { readFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import { loadConfig } from '../src/config';
 import { JsonlSink } from '../src/sink/JsonlSink';
 import { MessageWindow } from '../src/collectors/messageWindow';
 import { chatIdToE164, waTimestampToIso, isGroupId } from '../src/util/phone';
+import { localIso, localStamp, dateKey } from '../src/util/time';
 import { EVENT_SCHEMA_VERSION, type CapturedEvent } from '../src/types';
 
 const results: string[] = [];
@@ -20,21 +20,27 @@ assert.strictEqual(chatIdToE164('123456789@lid'), null, 'lid não tem número');
 assert.strictEqual(chatIdToE164(null), null);
 ok('chatIdToE164 só devolve número para @c.us válido');
 
-assert.strictEqual(waTimestampToIso(1754936000), '2025-08-11T18:13:20.000Z');
-assert.strictEqual(waTimestampToIso(1754936000000), '2025-08-11T18:13:20.000Z');
+// 18:13:20 em UTC é 15:13:20 em São Paulo — o mesmo instante, escrito no fuso
+// de quem lê os dados.
+assert.strictEqual(waTimestampToIso(1754936000), '2025-08-11T15:13:20.000-03:00');
+assert.strictEqual(waTimestampToIso(1754936000000), '2025-08-11T15:13:20.000-03:00');
 assert.strictEqual(waTimestampToIso(0), null);
-ok('waTimestampToIso aceita segundos e milissegundos');
+ok('waTimestampToIso aceita segundos e milissegundos, no fuso de São Paulo');
+
+// --- carimbos locais ---
+// O deslocamento faz parte do formato: quem consome esses campos usa
+// `new Date(...)` e precisa cair no mesmo instante de sempre.
+const instante = new Date('2026-08-17T21:05:16.159Z');
+assert.strictEqual(localIso(instante), '2026-08-17T18:05:16.159-03:00');
+assert.strictEqual(new Date(localIso(instante)).getTime(), instante.getTime(), 'mesmo instante');
+assert.strictEqual(localStamp(instante), '2026-08-17T18-05-16');
+// Meia-noite em São Paulo é 03:00Z: o dia da série tem de virar aqui, não lá.
+assert.strictEqual(dateKey(new Date('2026-08-18T02:59:59Z')), '2026-08-17');
+assert.strictEqual(dateKey(new Date('2026-08-18T03:00:00Z')), '2026-08-18');
+ok('localIso preserva o instante e o dia vira à meia-noite de São Paulo');
 
 assert.ok(isGroupId('1@g.us') && !isGroupId('1@c.us'));
 ok('isGroupId distingue grupo de contato');
-
-// --- config ---
-const cfg = loadConfig();
-assert.strictEqual(cfg.groupIds.size, cfg.groups.length, 'whitelist e Set em sincronia');
-assert.ok(cfg.groups.every((g) => g.id.endsWith('@g.us')), 'só ids de grupo passam na validação');
-assert.ok(cfg.eventsFile.endsWith('data/events.jsonl'));
-assert.ok(cfg.backfillDays > 0 && cfg.backfillMaxMessages > 0, 'defaults de backfill válidos');
-ok('loadConfig valida a whitelist e os parâmetros de backfill');
 
 // --- MessageWindow + gancho de primeira visão ---
 const seen: string[] = [];

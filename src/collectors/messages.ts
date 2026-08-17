@@ -10,6 +10,7 @@ import { EVENT_SCHEMA_VERSION } from '../types';
 import type { CapturedEvent, MessagePayload } from '../types';
 import { waTimestampToIso } from '../util/phone';
 import { createLogger } from '../util/logger';
+import { localIso } from '../util/time';
 import type { Collector, CollectorContext } from './Collector';
 import type { MessageWindow } from './messageWindow';
 
@@ -80,7 +81,7 @@ export class MessagesCollector implements Collector {
       schema: EVENT_SCHEMA_VERSION,
       eventId: ctx.newEventId(),
       type: 'message',
-      capturedAt: new Date().toISOString(),
+      capturedAt: localIso(),
       group: { id: groupId, name: await ctx.groupName(groupId) },
       actor,
       payload,

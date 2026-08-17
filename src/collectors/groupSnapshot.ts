@@ -6,6 +6,7 @@
 import { EVENT_SCHEMA_VERSION } from '../types';
 import type { CapturedEvent, GroupSnapshotPayload } from '../types';
 import { createLogger } from '../util/logger';
+import { localIso } from '../util/time';
 import type { CollectorContext } from './Collector';
 
 const log = createLogger('group-snapshot');
@@ -60,7 +61,7 @@ export async function emitGroupSnapshot(
     schema: EVENT_SCHEMA_VERSION,
     eventId: ctx.newEventId(),
     type: 'group_snapshot',
-    capturedAt: new Date().toISOString(),
+    capturedAt: localIso(),
     group: { id: groupId, name: subject ?? (await ctx.groupName(groupId)) },
     actor: null,
     payload,

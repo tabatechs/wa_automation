@@ -33,6 +33,7 @@ import { EVENT_SCHEMA_VERSION } from '../types';
 import type { CapturedEvent, MessageReadPayload } from '../types';
 import { MessageInfoReader, type MessageInfoSource } from '../enrich/messageInfo';
 import { createLogger } from '../util/logger';
+import { localIso } from '../util/time';
 import type { Collector, CollectorContext } from './Collector';
 
 const log = createLogger('collector:read-receipts');
@@ -204,7 +205,7 @@ export class ReadReceiptsCollector implements Collector {
       schema: EVENT_SCHEMA_VERSION,
       eventId: ctx.newEventId(),
       type: 'message_read',
-      capturedAt: new Date().toISOString(),
+      capturedAt: localIso(),
       group: { id: groupId, name: await ctx.groupName(groupId) },
       actor: await ctx.roster.resolve(readerId),
       payload,

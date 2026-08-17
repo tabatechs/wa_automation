@@ -2,6 +2,7 @@ import { createWriteStream, mkdirSync, statSync, renameSync, type WriteStream } 
 import path from 'node:path';
 import type { CapturedEvent } from '../types';
 import { createLogger } from '../util/logger';
+import { localStamp } from '../util/time';
 import type { Sink } from './Sink';
 
 const log = createLogger('sink:jsonl');
@@ -65,7 +66,7 @@ export class JsonlSink implements Sink {
 
   private async rotate(): Promise<void> {
     const { filePath } = this.options;
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const stamp = localStamp();
     const ext = path.extname(filePath);
     const rotated = path.join(
       path.dirname(filePath),

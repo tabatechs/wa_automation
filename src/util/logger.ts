@@ -4,6 +4,8 @@
  * não vem poluído com log.
  */
 
+import { localIso } from './time';
+
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 } as const;
 
 export type LogLevel = keyof typeof LEVELS;
@@ -21,7 +23,7 @@ export function setLogLevel(level: LogLevel): void {
 
 function emit(level: LogLevel, scope: string, message: string, extra?: unknown): void {
   if (LEVELS[level] < threshold) return;
-  const line = `${new Date().toISOString()} ${level.toUpperCase().padEnd(5)} [${scope}] ${message}`;
+  const line = `${localIso()} ${level.toUpperCase().padEnd(5)} [${scope}] ${message}`;
   if (extra === undefined) {
     process.stderr.write(`${line}\n`);
     return;

@@ -15,6 +15,7 @@ import type { ParticipantChangedEventModel } from '@open-wa/wa-automate/dist/api
 import { EVENT_SCHEMA_VERSION } from '../types';
 import type { CapturedEvent, ParticipantAction, ParticipantsChangedPayload } from '../types';
 import { createLogger } from '../util/logger';
+import { localIso } from '../util/time';
 import type { Collector, CollectorContext } from './Collector';
 import { emitGroupSnapshot } from './groupSnapshot';
 
@@ -70,7 +71,7 @@ export class ParticipantsCollector implements Collector {
       schema: EVENT_SCHEMA_VERSION,
       eventId: ctx.newEventId(),
       type: 'participants_changed',
-      capturedAt: new Date().toISOString(),
+      capturedAt: localIso(),
       group: { id: groupId!, name: await ctx.groupName(groupId!) },
       actor: by,
       payload,

@@ -40,7 +40,12 @@ export interface BaseEvent {
   schema: typeof EVENT_SCHEMA_VERSION;
   eventId: string;
   type: EventType;
-  /** Momento em que ESTE processo capturou o evento (ISO 8601, UTC). */
+  /**
+   * Momento em que ESTE processo capturou o evento, em ISO 8601 com o fuso de
+   * São Paulo (`2026-08-17T18:05:16.159-03:00`) — ver `util/time.ts`. Eventos
+   * gravados antes de 17/08/2026 estão em UTC (`...Z`); o instante é o mesmo e
+   * qualquer parser de ISO 8601 lê os dois.
+   */
   capturedAt: string;
   group: GroupRef | null;
   actor: Actor | null;

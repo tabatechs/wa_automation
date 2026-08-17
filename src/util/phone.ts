@@ -9,6 +9,8 @@
  * O id é sempre a chave canônica; o número é derivado e pode não existir.
  */
 
+import { localIso } from './time';
+
 const CONTACT_SUFFIX = '@c.us';
 const GROUP_SUFFIX = '@g.us';
 
@@ -82,7 +84,10 @@ export function parsePhone(e164: string | null | undefined): ParsedPhone {
   };
 }
 
-/** Converte um timestamp do WhatsApp (segundos ou milissegundos) para ISO 8601. */
+/**
+ * Converte um timestamp do WhatsApp (segundos ou milissegundos) para ISO 8601
+ * no fuso de São Paulo — ver `util/time.ts`.
+ */
 export function waTimestampToIso(timestamp: number | null | undefined): string | null {
   if (typeof timestamp !== 'number' || !Number.isFinite(timestamp) || timestamp <= 0) {
     return null;
@@ -90,5 +95,5 @@ export function waTimestampToIso(timestamp: number | null | undefined): string |
   // O WhatsApp usa segundos na maioria dos campos, mas alguns vêm em ms.
   const ms = timestamp > 1e11 ? timestamp : timestamp * 1000;
   const date = new Date(ms);
-  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  return Number.isNaN(date.getTime()) ? null : localIso(date);
 }
