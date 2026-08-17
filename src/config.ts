@@ -1,12 +1,17 @@
 /**
- * Carrega e valida a configuração: variáveis de ambiente + config/groups.json.
+ * Carrega e valida a configuração, toda vinda de variáveis de ambiente.
  *
  * A whitelist de grupos é o controle de privacidade central do projeto — por isso
  * ela é validada de forma estrita e exposta como um Set para checagem O(1) na
  * primeira linha de cada handler.
+ *
+ * Ela mora em `MONITORED_GROUPS` (no `.env`, que não é versionado) e não mais em
+ * `config/groups.json`: id e nome de grupo identificam pessoas reais e não têm
+ * por que entrar num repositório público. Vale para qualquer configuração nova
+ * que carregue conteúdo — arquivo versionado é para parâmetro, não para dado.
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { config as loadDotenv } from 'dotenv';
 import { z } from 'zod';
@@ -71,6 +76,10 @@ const envSchema = z.object({
   BACKFILL_DAYS: z.coerce.number().positive().default(7),
   // Teto de segurança: evita paginar indefinidamente num grupo muito ativo.
   BACKFILL_MAX_MESSAGES: z.coerce.number().int().positive().default(5_000),
+  // Whitelist de grupos: ids separados por vírgula ou quebra de linha. Fica no
+  // .env, e não num arquivo versionado, porque é dado e não parâmetro — ver
+  // `parseGroups`.
+  MONITORED_GROUPS: z.string().default(''),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   // --- MongoDB ---
   // Sem MONGODB_URI o Mongo simplesmente não sobe e o monitor segue como antes,
@@ -96,19 +105,8 @@ const envSchema = z.object({
   METRICS_REFRESH_MS: z.coerce.number().int().min(0).default(5 * 60 * 1000),
 });
 
-const groupEntrySchema = z.object({
-  id: z.string().refine(isGroupId, { message: 'o id de um grupo deve terminar em @g.us' }),
-  label: z.string().optional(),
-  enabled: z.boolean().default(true),
-});
-
-const groupsFileSchema = z.object({
-  groups: z.array(groupEntrySchema).default([]),
-});
-
 export interface MonitoredGroup {
   id: string;
-  label?: string;
 }
 
 export interface AppConfig {
@@ -159,24 +157,16 @@ export function loadConfig(): AppConfig {
   }
   const env = parsedEnv.data;
 
-  const groupsPath = path.join(PROJECT_ROOT, 'config', 'groups.json');
-  let rawGroups: unknown;
-  try {
-    rawGroups = JSON.parse(readFileSync(groupsPath, 'utf8'));
-  } catch (error) {
-    throw new Error(
-      `Não foi possível ler ${groupsPath}: ${(error as Error).message}\n` +
-        'Crie o arquivo com {"groups": []} ou rode `npm run list-groups` para descobrir os ids.',
+  const groups = parseGroups(env.MONITORED_GROUPS);
+
+  // O arquivo antigo continua no disco de quem já tinha o projeto, e um monitor
+  // rodando sem gravar nada é a falha mais silenciosa possível — daí o aviso.
+  if (existsSync(path.join(PROJECT_ROOT, 'config', 'groups.json'))) {
+    process.stderr.write(
+      'AVISO: config/groups.json não é mais lido. A whitelist agora é a variável ' +
+        'MONITORED_GROUPS, no .env. Migre os ids e apague o arquivo.\n',
     );
   }
-
-  const parsedGroups = groupsFileSchema.safeParse(rawGroups);
-  if (!parsedGroups.success) {
-    throw new Error(`config/groups.json inválido:\n${formatIssues(parsedGroups.error)}`);
-  }
-
-  const enabled = parsedGroups.data.groups.filter((g) => g.enabled);
-  const groups: MonitoredGroup[] = enabled.map((g) => ({ id: g.id, label: g.label }));
 
   return {
     sessionId: env.SESSION_ID,
@@ -221,6 +211,53 @@ export function loadConfig(): AppConfig {
       metricsRefreshMs: env.METRICS_REFRESH_MS,
     },
   };
+}
+
+/**
+ * Lê a whitelist de `MONITORED_GROUPS`: só ids, separados por vírgula ou quebra
+ * de linha.
+ *
+ *     MONITORED_GROUPS="1203...@g.us, 1203...@g.us"
+ *
+ * Sem rótulo: o nome do grupo é lido do WhatsApp em execução, e um apelido
+ * escrito à mão só teria como envelhecer. O que vier depois de um `=` é
+ * ignorado — assim uma lista antiga, com rótulo, continua funcionando. Um `#`
+ * no início da entrada a desliga sem apagar o id, no lugar do antigo
+ * `"enabled": false`.
+ *
+ * Id inválido interrompe o boot em vez de ser ignorado: uma linha com erro de
+ * digitação silenciosamente fora da whitelist é um grupo inteiro não gravado, e
+ * ninguém perceberia antes de ir procurar os dados.
+ */
+export function parseGroups(raw: string): MonitoredGroup[] {
+  const grupos: MonitoredGroup[] = [];
+  const vistos = new Set<string>();
+  const invalidos: string[] = [];
+
+  for (const bruta of raw.split(/[\n,]/)) {
+    const entrada = bruta.trim();
+    if (!entrada || entrada.startsWith('#')) continue;
+
+    const id = (entrada.split('=')[0] ?? '').trim();
+
+    if (!isGroupId(id)) {
+      invalidos.push(entrada);
+      continue;
+    }
+    if (vistos.has(id)) continue;
+
+    vistos.add(id);
+    grupos.push({ id });
+  }
+
+  if (invalidos.length > 0) {
+    throw new Error(
+      'MONITORED_GROUPS tem entrada inválida (todo id de grupo termina em @g.us):\n' +
+        invalidos.map((e) => `  - ${e}`).join('\n') +
+        '\nRode `npm run list-groups` para conferir os ids.',
+    );
+  }
+  return grupos;
 }
 
 function formatIssues(error: z.ZodError): string {

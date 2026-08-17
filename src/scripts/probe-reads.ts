@@ -51,7 +51,7 @@ async function main(): Promise<void> {
   setLogLevel(config.logLevel);
 
   if (config.groups.length === 0) {
-    log.error('nenhum grupo habilitado em config/groups.json — não há onde procurar');
+    log.error('MONITORED_GROUPS está vazio no .env — não há onde procurar');
     process.exit(1);
   }
 
@@ -80,7 +80,7 @@ async function main(): Promise<void> {
     const desdeMs = Date.now() - config.backfillDays * 24 * 3600e3;
 
     for (const group of config.groups) {
-      const nome = group.label ?? group.id;
+      const nome = group.id;
       const { proprias, totalNoStore } = await mensagensProprias(client, group.id, desdeMs);
       findings.mensagensPropriasEncontradas += proprias.length;
 

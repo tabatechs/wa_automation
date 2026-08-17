@@ -152,10 +152,10 @@ export interface GroupParticipant {
 }
 
 export interface GroupDoc {
-  /** O id do WhatsApp, `120363428946452522@g.us`. */
+  /** O id do WhatsApp, `120363000000000000@g.us`. */
   _id: string;
   subject: string | null;
-  /** Rótulo de `config/groups.json`, quando o WhatsApp não devolve o nome. */
+  /** Legado: rótulo local da whitelist, que hoje guarda só ids. Sempre null. */
   label: string | null;
   description: string | null;
   owner: string | null;

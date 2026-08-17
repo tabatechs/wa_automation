@@ -17,7 +17,7 @@ import type { CollectorContext } from '../src/collectors/Collector';
 const out: string[] = [];
 const ok = (s: string) => out.push(`  ✓ ${s}`);
 
-const G = '120363429416431036@g.us';
+const G = '120363000000000001@g.us';
 const MSG = 'true_..._3EB0F3CBF03C9CAAD72154_199372465811459@lid';
 const NOW = Date.now();
 const SENDER = '237194031669378@lid';

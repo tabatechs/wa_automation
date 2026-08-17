@@ -21,8 +21,8 @@ import type { MessageInfoResult, MessageInfoSource } from '../src/enrich/message
 const out: string[] = [];
 const ok = (s: string) => out.push(`  ✓ ${s}`);
 
-const G = '120363429416431036@g.us';
-const MINHA = 'true_120363429416431036@g.us_3EB0MINHA_me';
+const G = '120363000000000001@g.us';
+const MINHA = 'true_120363000000000001@g.us_3EB0MINHA_me';
 const NOW = Date.now();
 const EU = '5511900000000@c.us';
 const LIVIA = '5521994312345@c.us';
@@ -171,7 +171,7 @@ async function run() {
   {
     const dir2 = mkdtempSync(path.join(tmpdir(), 'wa-reads-alheia-'));
     const emitted: Emitted[] = [];
-    const ALHEIA = 'true_120363429416431036@g.us_3EB0OUTRA_livia';
+    const ALHEIA = 'true_120363000000000001@g.us_3EB0OUTRA_livia';
     const source = new FakeSource(new Map([[ALHEIA, info([RAPHAEL])]]));
     const { window, collector } = montar(dir2, source);
 

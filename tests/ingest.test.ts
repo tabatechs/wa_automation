@@ -14,7 +14,7 @@ import { EVENT_SCHEMA_VERSION, type CapturedEvent } from '../src/types';
 const results: string[] = [];
 function ok(name: string) { results.push(`  ✓ ${name}`); }
 
-const GROUP = '120363428946452522@g.us';
+const GROUP = '120363000000000000@g.us';
 
 // --- driver falso -----------------------------------------------------------
 
@@ -133,7 +133,7 @@ function message(id: string, opts: Partial<{
     eventId: `uuid-${Math.random()}`, // muda a cada emissão, de propósito
     type: 'message',
     capturedAt: '2026-08-12T18:00:00.000Z',
-    group: { id: GROUP, name: 'RADAR' },
+    group: { id: GROUP, name: 'Grupo de exemplo' },
     actor: {
       id: actorId,
       phone: opts.phone === undefined ? '+5511988812345' : opts.phone,
@@ -162,7 +162,7 @@ function reaction(target: string, emoji = '❤️', actorId = '117574830403792@l
     eventId: `uuid-${Math.random()}`,
     type: 'reaction_added',
     capturedAt: '2026-08-12T18:05:00.000Z',
-    group: { id: GROUP, name: 'RADAR' },
+    group: { id: GROUP, name: 'Grupo de exemplo' },
     actor: { id: actorId, phone: '+5521994312345', name: 'Lívia', nameSource: 'pushname' },
     payload: { targetMessageId: target, emoji, reactedAt: '2026-08-12T18:05:00.000Z' },
   };
@@ -175,7 +175,7 @@ function leitura(target: string, actorId = '117574830403792@lid'): CapturedEvent
     eventId: `uuid-${Math.random()}`,
     type: 'message_read',
     capturedAt: '2026-08-12T18:10:00.000Z',
-    group: { id: GROUP, name: 'RADAR' },
+    group: { id: GROUP, name: 'Grupo de exemplo' },
     actor: { id: actorId, phone: '+5521994312345', name: 'Lívia', nameSource: 'pushname' },
     payload: {
       targetMessageId: target,
@@ -407,10 +407,10 @@ async function run() {
       eventId: 'uuid-snap',
       type: 'group_snapshot',
       capturedAt: '2026-08-12T18:00:00.000Z',
-      group: { id: GROUP, name: 'RADAR' },
+      group: { id: GROUP, name: 'Grupo de exemplo' },
       actor: null,
       payload: {
-        subject: 'RADAR TABATA #04',
+        subject: 'Grupo de exemplo',
         description: null,
         owner: null,
         participantCount: 1,

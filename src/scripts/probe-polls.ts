@@ -49,7 +49,7 @@ async function main(): Promise<void> {
   setLogLevel(config.logLevel);
 
   if (config.groups.length === 0) {
-    log.error('nenhum grupo habilitado em config/groups.json — não há onde procurar enquete');
+    log.error('MONITORED_GROUPS está vazio no .env — não há onde procurar enquete');
     process.exit(1);
   }
 
@@ -124,7 +124,7 @@ async function main(): Promise<void> {
           if (lote.length > messages.length) messages = lote;
         }
         log.info('histórico lido', {
-          grupo: group.label ?? group.id,
+          grupo: group.id,
           mensagens: messages.length,
         });
 
@@ -136,7 +136,7 @@ async function main(): Promise<void> {
           if (Array.isArray(options) && options.length > 0) {
             polls.push({
               id: String(message.id ?? ''),
-              grupo: group.label ?? group.id,
+              grupo: group.id,
               pergunta: String(
                 (message as { pollName?: unknown; body?: unknown }).pollName ??
                   message.body ??
@@ -148,7 +148,7 @@ async function main(): Promise<void> {
         }
       } catch (error) {
         log.warn('não foi possível ler o histórico do grupo', {
-          grupo: group.label ?? group.id,
+          grupo: group.id,
           error: String(error),
         });
       }

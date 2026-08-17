@@ -26,6 +26,7 @@ import { emitGroupSnapshot } from './collectors/groupSnapshot';
 import type { Collector, CollectorContext } from './collectors/Collector';
 import { EVENT_SCHEMA_VERSION, type CapturedEvent } from './types';
 import { createLogger, setLogLevel } from './util/logger';
+import { localIso } from './util/time';
 
 const log = createLogger('main');
 
@@ -35,11 +36,11 @@ async function main(): Promise<void> {
 
   if (config.groups.length === 0) {
     log.warn(
-      'Nenhum grupo habilitado em config/groups.json — nada será gravado. ' +
+      'MONITORED_GROUPS está vazio no .env — nada será gravado. ' +
         'Rode `npm run list-groups` para descobrir os ids.',
     );
   } else {
-    log.info('grupos monitorados', config.groups.map((g) => g.label ?? g.id));
+    log.info('grupos monitorados', config.groups.map((g) => g.id));
   }
 
   // O JSONL é sempre o destino durável; o Mongo entra ao lado quando há URI.
@@ -170,7 +171,10 @@ function buildContext(
         )) as { name?: string; formattedTitle?: string } | undefined;
         name = chat?.name ?? chat?.formattedTitle ?? null;
       } catch {
-        name = config.groups.find((g) => g.id === groupId)?.label ?? null;
+        // Sem nome: a whitelist guarda só ids, e inventar um apelido local
+        // criaria um segundo nome para o mesmo grupo. O recálculo preenche o
+        // nome a partir do group_snapshot, que vem do WhatsApp.
+        name = null;
       }
       nameCache.set(groupId, name);
       return name;
@@ -188,7 +192,7 @@ async function registerStateListener(ctx: CollectorContext): Promise<void> {
       schema: EVENT_SCHEMA_VERSION,
       eventId: ctx.newEventId(),
       type: 'session_state',
-      capturedAt: new Date().toISOString(),
+      capturedAt: localIso(),
       group: null,
       actor: null,
       payload: { state, previous },

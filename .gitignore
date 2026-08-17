@@ -13,6 +13,9 @@ data/
 .env
 .env.*
 !.env.example
+# A whitelist saiu para MONITORED_GROUPS no .env: id e nome de grupo apontam
+# para pessoas reais. Se um config/groups.json local reaparecer, ele fica fora.
+config/groups.json
 # Artefatos do open-wa / puppeteer
 .wwebjs*
 session/
