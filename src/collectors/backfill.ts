@@ -15,9 +15,13 @@
  * A deduplicação é por messageId no checkpoint, então rodar o backfill de novo
  * (ou sobrepor com o listener ao vivo) não duplica evento nenhum.
  *
- * Limite honesto: no multi-device o WhatsApp só sincroniza uma janela de
- * histórico para os aparelhos conectados. `loadEarlierMessages` vai até onde o
- * WhatsApp entregou e para — não existe "o grupo inteiro desde a criação".
+ * Limite honesto, e ele é grande: **não há carregamento de histórico**. Nesta
+ * build do WhatsApp Web toda a família `loadEarlierMsgs` estoura antes de tocar
+ * o servidor (investigação em `npm run probe-history`, resumo no CLAUDE.md), e
+ * insistir custava três chamadas quebradas por grupo a cada boot sem trazer uma
+ * mensagem sequer. O backfill recupera o que o WA Web já tem em memória — o que
+ * costuma emendar uma reinicialização curta, e nada além disso. É por isso que
+ * uptime é o requisito central do monitor.
  */
 
 import type { Client, Message } from '@open-wa/wa-automate';
@@ -25,7 +29,7 @@ import { EVENT_SCHEMA_VERSION } from '../types';
 import type { CapturedEvent, MessagePayload, ParticipantsChangedPayload } from '../types';
 import { waTimestampToIso } from '../util/phone';
 import { createLogger } from '../util/logger';
-import { HistoryLoader } from '../util/history';
+import { localIso } from '../util/time';
 import type { Collector, CollectorContext } from './Collector';
 import type { MessageWindow } from './messageWindow';
 
@@ -33,9 +37,6 @@ const log = createLogger('collector:backfill');
 
 export class BackfillCollector implements Collector {
   readonly name = 'backfill';
-
-  /** Criado no primeiro uso: precisa do client, que só existe no start. */
-  private loader: HistoryLoader | null = null;
 
   constructor(private readonly window: MessageWindow) {}
 
@@ -71,11 +72,11 @@ export class BackfillCollector implements Collector {
 
     log.info('iniciando backfill', {
       groupId,
-      desde: new Date(since).toISOString(),
+      desde: localIso(new Date(since)),
       jaRegistradas: checkpoint.emittedMessageIds.length,
     });
 
-    const messages = await this.loadUntil(ctx, groupId, since);
+    const messages = await this.readStore(ctx, groupId, checkpoint.lastMessageAt);
     if (messages.length === 0) {
       log.info('nada a recuperar', { groupId });
       return;
@@ -84,7 +85,16 @@ export class BackfillCollector implements Collector {
     // Ordem cronológica: o arquivo fica legível e o checkpoint avança certo.
     // Sobre uma cópia — o array veio do cliente e ordenar no lugar mexeria em
     // estrutura que não é nossa.
-    const ordered = [...messages].sort((a, b) => messageTime(a) - messageTime(b));
+    let ordered = [...messages].sort((a, b) => messageTime(a) - messageTime(b));
+
+    if (ordered.length > ctx.config.backfillMaxMessages) {
+      log.warn('teto de mensagens do backfill atingido; as mais antigas ficam de fora', {
+        groupId,
+        emMemoria: ordered.length,
+        teto: ctx.config.backfillMaxMessages,
+      });
+      ordered = ordered.slice(-ctx.config.backfillMaxMessages);
+    }
 
     let emitted = 0;
     let skipped = 0;
@@ -114,122 +124,42 @@ export class BackfillCollector implements Collector {
   }
 
   /**
-   * Carrega o histórico do servidor até cobrir `since`.
+   * Lê o que o WA Web já tem em memória para este chat.
    *
-   * O caminho principal é o `HistoryLoader`, que fala com o store do WA Web
-   * direto. As funções da lib (`loadEarlierMessagesTillDate` /
-   * `loadEarlierMessages`) ficam como última alternativa: as duas terminam em
-   * `chat.loadEarlierMsgs()`, que quebrou na build atual do WhatsApp Web — e
-   * como a antiga "paginação manual" chamava exatamente essa função, a reserva
-   * morria junto com o caminho principal, em silêncio.
+   * Nenhuma chamada de carregamento: as três rotas conhecidas
+   * (`WAPI.loadEarlierMessagesTillDate`, `WAPI.loadEarlierMessages` e
+   * `WAWebChatLoadMessages.loadEarlierMsgs`) terminam no mesmo ponto quebrado
+   * do bundle do WhatsApp — chamá-las só produzia erro no log.
+   *
+   * O aviso que importa não é mais "o histórico carregou?", e sim "a emenda
+   * fechou?": se a mensagem mais antiga em memória for posterior à última que
+   * registramos, existe um intervalo que ninguém viu e que não é recuperável.
+   * É esse o número a vigiar num monitor que vive de uptime.
    */
-  private async loadUntil(
+  private async readStore(
     ctx: CollectorContext,
     groupId: string,
-    since: number,
+    lastMessageAt: number | null,
   ): Promise<Message[]> {
     const chatId = groupId as Parameters<Client['getAllMessagesInChat']>[0];
-
-    this.loader ??= new HistoryLoader(ctx.client);
-    // Cada passo traz ~50 mensagens; o teto de passos respeita o de mensagens.
-    const maxSteps = Math.max(1, Math.ceil(ctx.config.backfillMaxMessages / 50));
-    const resultado = await this.loader.loadUntil(groupId, since, maxSteps);
-
-    if (!resultado.ok) {
-      // Caminhos da lib como reserva. Nesta build do WA Web os dois terminam em
-      // `chat.loadEarlierMsgs()` e falham junto, mas cobrem builds mais antigas
-      // — e a paginação manual é o que o commit da regressão deixou testado.
-      try {
-        await ctx.client.loadEarlierMessagesTillDate(
-          chatId as Parameters<Client['loadEarlierMessagesTillDate']>[0],
-          Math.floor(since / 1000),
-        );
-      } catch (error) {
-        log.warn('loadEarlierMessagesTillDate falhou; caindo para paginação manual', {
-          groupId,
-          error: String(error),
-        });
-        await this.paginateManually(ctx, chatId, since);
-      }
-    }
-
     const messages = await this.safeGetAll(ctx, chatId);
-    log.info('histórico carregado', {
+    const oldest = oldestUsableTime(messages);
+
+    log.info('mensagens em memória', {
       groupId,
-      mensagensNoStore: messages.length,
+      total: messages.length,
       maisAntiga: describeOldest(messages),
-      rota: resultado.route,
-      passos: resultado.steps,
-      cobriuAJanela: resultado.covered,
     });
 
-    // O alarme olha o que temos de fato, não o que a rota disse ter feito: o
-    // store pode já estar quente por outro motivo. Antes isto falhava calado —
-    // `mensagensNoStore: 1` num grupo ativo parecia linha de rotina, e é o
-    // sintoma mais importante que o monitor pode dar. Sem histórico, um
-    // reinício perde tudo que aconteceu no intervalo.
-    const oldest = oldestUsableTime(messages);
-    const cobriu = oldest !== null && oldest <= since;
-
-    if (messages.length <= 1) {
-      log.error(
-        'HISTÓRICO NÃO CARREGOU — o monitor vai capturar apenas o que chegar ao vivo, ' +
-          'e um reinício perderá o intervalo',
-        { groupId, mensagensNoStore: messages.length, rota: resultado.route },
-      );
-    } else if (!resultado.ok) {
-      log.warn('não foi possível paginar; seguindo com o que já estava no store', {
+    if (lastMessageAt !== null && oldest !== null && oldest > lastMessageAt) {
+      log.warn('lacuna: o store não alcança a última mensagem registrada', {
         groupId,
-        mensagensNoStore: messages.length,
-      });
-    } else if (!cobriu) {
-      log.warn('histórico não cobriu a janela inteira; o WhatsApp entregou só até onde tinha', {
-        groupId,
-        desde: new Date(since).toISOString(),
-        maisAntiga: describeOldest(messages),
+        ultimaRegistrada: localIso(new Date(lastMessageAt)),
+        maisAntigaEmMemoria: localIso(new Date(oldest)),
       });
     }
 
-    if (messages.length >= ctx.config.backfillMaxMessages) {
-      log.warn('teto de mensagens do backfill atingido; histórico pode estar incompleto', {
-        groupId,
-        teto: ctx.config.backfillMaxMessages,
-      });
-    }
     return messages;
-  }
-
-  /**
-   * Última reserva: pagina de 50 em 50 até cobrir `since` ou parar de progredir.
-   *
-   * Continua aqui mesmo com o `HistoryLoader` na frente porque é o caminho que
-   * o commit da regressão de paginação deixou coberto por teste — e porque numa
-   * build antiga do WA Web ele ainda é o que funciona.
-   */
-  private async paginateManually(
-    ctx: CollectorContext,
-    chatId: Parameters<Client['getAllMessagesInChat']>[0],
-    since: number,
-  ): Promise<void> {
-    let previousCount = -1;
-    let messages = await this.safeGetAll(ctx, chatId);
-
-    while (messages.length < ctx.config.backfillMaxMessages && messages.length !== previousCount) {
-      // Só mensagens com timestamp utilizável entram na conta. Considerar as de
-      // tempo 0 (notificações de sistema, por exemplo) derrubava `oldest` para
-      // zero e encerrava a paginação na primeira volta.
-      const oldest = oldestUsableTime(messages);
-      if (oldest !== null && oldest <= since) break;
-
-      previousCount = messages.length;
-      try {
-        await ctx.client.loadEarlierMessages(chatId as Parameters<Client['loadEarlierMessages']>[0]);
-      } catch (error) {
-        log.debug('loadEarlierMessages parou', { error: String(error) });
-        break;
-      }
-      messages = await this.safeGetAll(ctx, chatId);
-    }
   }
 
   private async safeGetAll(
@@ -277,7 +207,7 @@ export class BackfillCollector implements Collector {
       schema: EVENT_SCHEMA_VERSION,
       eventId: ctx.newEventId(),
       type: 'message',
-      capturedAt: new Date().toISOString(),
+      capturedAt: localIso(),
       group: { id: groupId, name: await ctx.groupName(groupId) },
       actor,
       payload,
@@ -313,7 +243,7 @@ export class BackfillCollector implements Collector {
         schema: EVENT_SCHEMA_VERSION,
         eventId: ctx.newEventId(),
         type: 'participants_changed',
-        capturedAt: new Date().toISOString(),
+        capturedAt: localIso(),
         group: { id: groupId, name: await ctx.groupName(groupId) },
         // Sem autor: quem executou a ação não é recuperável depois do fato.
         actor: null,
@@ -360,7 +290,7 @@ function oldestUsableTime(messages: readonly Message[]): number | null {
 
 function describeOldest(messages: readonly Message[]): string {
   const oldest = oldestUsableTime(messages);
-  return oldest === null ? 'nenhuma com timestamp' : new Date(oldest).toISOString();
+  return oldest === null ? 'nenhuma com timestamp' : localIso(new Date(oldest));
 }
 
 function resolveAuthorId(message: Message): string | null {
