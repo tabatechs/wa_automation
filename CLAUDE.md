@@ -21,9 +21,13 @@ ou qualquer outra que altere estado no WhatsApp. Isso não é uma preferência d
 estilo: é o que separa um monitor de um bot, e vale para qualquer funcionalidade
 nova.
 
-O segundo lado disso é a whitelist em `config/groups.json`. Só o que estiver lá
-é gravado. Nenhum caminho de código deve persistir evento de grupo fora dela —
-`ctx.isMonitored(chatId)` é a primeira linha de todo handler.
+O segundo lado disso é a whitelist em `MONITORED_GROUPS`, no `.env`. Só o que
+estiver lá é gravado. Nenhum caminho de código deve persistir evento de grupo
+fora dela — `ctx.isMonitored(chatId)` é a primeira linha de todo handler.
+
+Ela saiu de `config/groups.json` em 17/08/2026: id e nome de grupo apontam para
+pessoas reais e não entram em arquivo versionado. A regra vale para
+configuração nova — arquivo do repositório guarda parâmetro, `.env` guarda dado.
 
 ## Arquitetura
 
@@ -44,6 +48,10 @@ coletores  →  ctx.emit()  →  Sink  →  JSONL (durável)
   LID→`@c.us`; `messageInfo.ts` lê os "dados da mensagem" (quem leu) pelo store.
 - `src/state/checkpoint.ts` — dedupe de mensagens e ponto de retomada entre
   execuções.
+- `src/util/time.ts` — o fuso do projeto. `localIso()` carimba todo evento e
+  todo log em São Paulo (`…-03:00`); `timeParts()`/`dateKey()` fazem os buckets
+  diários e por hora. Não use `toISOString()` em nada que seja gravado ou lido
+  por humano: ele devolve UTC e a série sai partida em dois fusos.
 
 O JSONL é sempre a fonte durável. O Mongo é destino secundário: se ele cair, o
 monitor continua gravando em disco e `npm run mongo:import` recupera depois.
@@ -54,7 +62,7 @@ monitor continua gravando em disco e `npm run mongo:import` recupera depois.
 npm run dev            # sobe o monitor (tsx)
 npm test               # testes; sem rede, sem sessão do WhatsApp
 npm run typecheck      # tsc --noEmit
-npm run list-groups    # descobre os ids dos grupos da conta
+npm run list-groups    # ids dos grupos; grava data/grupos.txt, aceita `-- filtro`
 npm run compact        # JSONL -> JSON único
 npm run mongo:import   # carrega o JSONL no Mongo (idempotente)
 npm run mongo:build    # recalcula métricas; --full reconta tudo do zero
@@ -77,6 +85,10 @@ código velho; use `npm run dev`.
   emitido — ver `tests/reactions.test.ts` e `tests/ingest.test.ts`.
 - Nada no caminho de captura pode lançar. Perder um nome é aceitável; perder um
   evento, não. Falha de enriquecimento ou de banco vira log.
+- Todo horário gravado é ISO 8601 no fuso de São Paulo (`localIso()`), nunca
+  UTC. O instante é o mesmo, e `new Date(...)` continua lendo — o que muda é
+  quem lê sem converter de cabeça. Eventos anteriores a 17/08/2026 estão em
+  `…Z` e continuam válidos.
 
 ## Armadilhas conhecidas
 
@@ -122,14 +134,15 @@ do projeto — por isso `message_read` fica fora do log bruto, junto com
 mensagem, uma vez só) nem melhora o horário, que vem do WhatsApp; só gasta
 consulta.
 
-**`getAllMessagesInChat` devolve só o que está na memória do WA Web.** Sem
-carregar o histórico antes, ela retorna 1 mensagem num grupo que tem centenas.
-Qualquer código novo que leia histórico precisa carregar primeiro — use
-`HistoryLoader` de `src/util/history.ts`, nunca as funções da lib direto.
+**`getAllMessagesInChat` devolve só o que está na memória do WA Web.** Num grupo
+com centenas de mensagens ela costuma devolver uma dúzia — é a janela que o WA
+Web mantém carregada, e não há como ampliá-la (ver o item seguinte). Quem
+escrever código novo que leia mensagens precisa contar com isso: o que não está
+em memória não existe para o monitor.
 
-**O backfill não consegue carregar histórico nesta build do WA Web.**
-Investigado com sessão real em 14/08/2026 (`npm run probe-history`). O que se
-sabe, para ninguém refazer o caminho:
+**O backfill não consegue carregar histórico nesta build do WA Web, e por isso
+nem tenta.** Investigado com sessão real em 14/08/2026 (`npm run probe-history`).
+O que se sabe, para ninguém refazer o caminho:
 
 - `WAPI.loadEarlierMessagesTillDate` e `WAPI.loadEarlierMessages` terminam as
   duas em `chat.loadEarlierMsgs()` — método que **não existe mais** no model.
@@ -153,9 +166,17 @@ sabe, para ninguém refazer o caminho:
 
 Consequência prática: **só a captura ao vivo é confiável**. O que o monitor
 perde enquanto está fora do ar não é recuperável. Uptime virou o requisito
-central. O `HistoryLoader` (`src/util/history.ts`) já tenta as rotas conhecidas
-e, ao falhar, loga os módulos de carga que existem — é por ali que se retoma a
-investigação se o WhatsApp mudar de novo.
+central.
+
+Em 17/08/2026 as tentativas saíram do caminho de boot: o `BackfillCollector` lê
+o que já está em memória (`getAllMessagesInChat`) e mais nada. O `HistoryLoader`
+(`src/util/history.ts`) foi removido junto com a "paginação manual" — as três
+rotas custavam um erro no log por grupo a cada boot e nunca trouxeram uma
+mensagem. O aviso que ficou é o que importa para quem opera: se a mensagem mais
+antiga em memória for **posterior** à última registrada no checkpoint, o log traz
+`lacuna: o store não alcança a última mensagem registrada`, com os dois horários
+— é o intervalo que ninguém viu. Se o WhatsApp mudar de novo, o ponto de partida
+é `npm run probe-history`, não escrever rota nova dentro do coletor.
 
 **`eventId` não é chave.** É um UUID novo a cada emissão. Toda chave no Mongo é
 derivada do conteúdo, e é isso que permite reimportar o JSONL sem duplicar. Se
@@ -176,6 +197,19 @@ quente.
 vazia logo após o boot num grupo grande — daí a espera com backoff em
 `roster.groupMembers(id, true)`. Um `group_snapshot` com `participantCount: 0`
 não significa grupo vazio, e nunca deve sobrescrever a lista conhecida.
+
+**Lista de participantes truncada é pior que lista vazia.** Quando o
+`getGroupParticipantIDs` do WA Web falha (`group members ids is not an array
+ERROR: this.$1 is not a function`), o open-wa não propaga erro: devolve a lista
+com o tamanho certo e a maioria dos contatos **sem `id`**. Em 17/08/2026 isso
+fez um grupo de 813 pessoas render 723 `participants_changed` de saída num boot
+só — quem perdeu o id some da comparação e a reconciliação lê como êxodo. As
+três defesas, todas necessárias: `roster.fetchMembers` descarta a lista inteira
+se qualquer contato vier sem id; `roster.groupMembers` devolve a última lista boa
+(`lastGoodMembers`, sem TTL) em vez de uma vazia; e `checkpoint.diffParticipants`
+ignora ids vazios e não reporta diferença nenhuma para lista vazia. Regra geral:
+**redução súbita de participantes é falha de sincronização até prova em
+contrário** — o WhatsApp não avisa quando entrega metadado pela metade.
 
 ## Nunca versionar
 

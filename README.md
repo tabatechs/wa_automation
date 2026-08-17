@@ -26,21 +26,30 @@ cp .env.example .env
 npm run list-groups
 ```
 
-Um QR code é desenhado **no terminal** (o processo roda headless, sem janela do Chromium). No celular: **Configurações → Aparelhos conectados → Conectar um aparelho**. Depois de parear, o script imprime todos os seus grupos com os respectivos ids.
+Um QR code é desenhado **no terminal** (o processo roda headless, sem janela do Chromium). No celular: **Configurações → Aparelhos conectados → Conectar um aparelho**. Depois de parear, o script imprime uma linha por grupo — `nº de participantes`, `id` e nome — e marca com `*` os que já estão sendo monitorados.
+
+Numa conta com muitos grupos a lista não cabe na tela, então ela é gravada também em `data/grupos.txt` e `data/grupos.json` (esse diretório não vai para o repositório). Para achar um grupo específico sem rolar nada, filtre pelo nome:
+
+```bash
+npm run list-groups -- apoio
+```
+
+Com filtro, o script ainda imprime a linha pronta para colar no `.env`.
 
 > Se preferir ver o navegador — para depurar o que a página está fazendo — rode com `HEADLESS=false`. Aí o QR aparece tanto na janela do Chromium quanto no terminal.
 
 **2. Configure a whitelist**
 
-Edite `config/groups.json` com o id que você quer monitorar:
+A whitelist é a variável `MONITORED_GROUPS`, no `.env` — só ids, separados por vírgula ou quebra de linha:
 
-```json
-{
-  "groups": [
-    { "id": "120363000000000000@g.us", "label": "Meu grupo", "enabled": true }
-  ]
-}
+```bash
+MONITORED_GROUPS="120363000000000000@g.us,
+120363000000000001@g.us"
 ```
+
+Sem apelido: o nome do grupo é lido do WhatsApp em execução. Um `#` no começo da entrada desliga aquele grupo sem apagar o id. Um id que não termine em `@g.us` interrompe o boot com a linha errada apontada — melhor parar do que monitorar menos do que se pensava.
+
+> Por que no `.env` e não num arquivo do projeto: id de grupo aponta para pessoas reais, e o `.env` não é versionado. O antigo `config/groups.json` foi removido.
 
 **3. Rode o monitor**
 
@@ -61,7 +70,7 @@ Um evento JSON por linha (JSON Lines) em `data/events.jsonl`:
   "schema": 1,
   "eventId": "8f3c…",
   "type": "message",
-  "capturedAt": "2026-08-11T14:03:22.114Z",
+  "capturedAt": "2026-08-11T11:03:22.114-03:00",
   "group": { "id": "1203…@g.us", "name": "Meu grupo" },
   "actor": {
     "id": "5511999998888@c.us",
@@ -82,6 +91,10 @@ Um evento JSON por linha (JSON Lines) em `data/events.jsonl`:
 | `session_state` | transições de conexão |
 
 `actor.id` é a chave canônica — use sempre ele para deduplicar. `name` pode ser `null` (contato sem nome salvo) e `nameSource` indica de qual campo do WhatsApp o nome veio.
+
+**Horários.** Todo carimbo é ISO 8601 no fuso de São Paulo, com o deslocamento explícito (`…-03:00`), e não em UTC: o dado é lido por gente que trabalha nesse fuso, e "21:05Z" para uma mensagem das 18:05 vira atrito em toda conferência manual. O instante é o mesmo que um `…Z` representaria, então `new Date(...)`, o Mongo e qualquer parser de ISO 8601 continuam funcionando — inclusive sobre os eventos gravados em UTC antes de 17/08/2026, que continuam válidos e não precisam de conversão. As séries diárias e o histograma por hora também usam São Paulo, então "pico às 20h" é 20h aqui. Para mudar de fuso, é a constante `TIMEZONE` em `src/util/time.ts`.
+
+No MongoDB, os campos de data são `Date` do BSON, que guarda o instante e não carrega fuso — o Compass e o Atlas costumam mostrá-los em UTC. As chaves de dia (`activity_daily`) e os histogramas, esses sim, já são de São Paulo.
 
 **Precisa de um `.json` normal?**
 
@@ -350,7 +363,7 @@ diagnóstico é somente leitura e repetível.
 - `skipUpdateCheck: true` — desliga o GET de checagem de versão que a lib faria em `raw.githubusercontent.com` no boot.
 - Sem licença configurada, não há chamada a servidor de licenças. Sem `messagePreprocessor: UPLOAD_CLOUD`, não há upload de mídia para nuvem. Nenhum webhook, banco remoto ou serviço externo.
 
-**Escopo da captura.** A sessão é um WhatsApp Web completo, então o processo *recebe* eventos de todas as suas conversas. O filtro de whitelist é aplicado na primeira linha de cada handler: o que não está em `config/groups.json` é descartado em memória e **nunca é escrito em disco**.
+**Escopo da captura.** A sessão é um WhatsApp Web completo, então o processo *recebe* eventos de todas as suas conversas. O filtro de whitelist é aplicado na primeira linha de cada handler: o que não está em `MONITORED_GROUPS` é descartado em memória e **nunca é escrito em disco**.
 
 **Nunca versione `data/`.** O diretório contém as credenciais de autenticação da sessão (`data/session/`) e todo o conteúdo capturado. Já está no `.gitignore`; vazar esses arquivos equivale a entregar acesso à conta.
 
@@ -406,7 +419,7 @@ Tudo em `.env` (veja `.env.example`):
 |---|---|
 | `npm run dev` | Roda o monitor com hot reload |
 | `npm run build` && `npm start` | Compila e roda a versão compilada |
-| `npm run list-groups` | Lista os grupos da conta com seus ids |
+| `npm run list-groups` | Lista os grupos da conta com seus ids; grava em `data/grupos.txt`. Aceita filtro: `-- parte-do-nome` |
 | `npm run compact` | Converte o JSONL num array `.json` |
 | `npm run mongo:import` | Carrega o JSONL no MongoDB; idempotente |
 | `npm run mongo:build` | Recalcula as métricas; `-- --full` reconta tudo do zero |
@@ -421,7 +434,7 @@ Tudo em `.env` (veja `.env.example`):
 ```
 src/
 ├─ index.ts              entrypoint: sessão, coletores, shutdown
-├─ config.ts             .env + config/groups.json validados com zod
+├─ config.ts             .env validado com zod (inclui a whitelist)
 ├─ session.ts            wrapper do create() do open-wa
 ├─ types.ts              contrato dos eventos
 ├─ sink/                 destinos: JSONL (durável), Mongo, e o fan-out
