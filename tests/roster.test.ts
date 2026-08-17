@@ -11,6 +11,8 @@ import { normalizeLid, isLid } from '../src/enrich/lid';
 const results: string[] = [];
 function ok(name: string) { results.push(`  ✓ ${name}`); }
 
+const G = '120363000000000000@g.us';
+
 // --- normalizeLid isolado ---
 assert.strictEqual(normalizeLid('199372465811459:71@lid'), '199372465811459@lid');
 assert.strictEqual(normalizeLid('199372465811459@lid'), '199372465811459@lid');
@@ -96,6 +98,41 @@ async function run() {
     assert.strictEqual(actor.phone, '+5511988812345');
     assert.strictEqual(actor.name, null);
     ok('erro no getContact custa o nome, não o evento');
+  }
+
+  // --- lista de participantes quebrada não substitui a boa ---
+  // O WA Web às vezes falha em montar os ids ("this.$1 is not a function") e o
+  // open-wa devolve a lista com o tamanho certo e os contatos vazios. Aceitar
+  // isso fez um grupo de 813 acusar 723 saídas de uma vez.
+  {
+    const quebrada = [{ id: '5511988812345@c.us', name: 'A' }, {}, {}];
+    const inteira = [
+      { id: '5511988812345@c.us', name: 'A' },
+      { id: '5511977712345@c.us', name: 'B' },
+    ];
+
+    // Sem nenhuma lista boa antes: melhor devolver nada do que uma lista
+    // menor. O consumidor trata "vazio" como falta de informação; uma lista
+    // parcial ele leria como as pessoas que faltam tendo saído.
+    const semHistorico = new Roster(fakeClient({ getGroupMembers: async () => quebrada }).client, 60_000);
+    assert.deepStrictEqual(await semHistorico.groupMembers(G), [], 'lista parcial é descartada');
+    ok('lista de participantes com contato sem id é descartada por inteiro');
+
+    let boa = true;
+    const { client } = fakeClient({ getGroupMembers: async () => (boa ? inteira : quebrada) });
+    const roster = new Roster(client, 60_000);
+
+    assert.strictEqual((await roster.groupMembers(G)).length, 2, 'a lista boa passa inteira');
+
+    boa = false;
+    roster.invalidateGroup(G);
+    const depois = await roster.groupMembers(G);
+    assert.deepStrictEqual(
+      depois.map((p) => p.id),
+      ['5511988812345@c.us', '5511977712345@c.us'],
+      'a última lista boa continua valendo',
+    );
+    ok('lista quebrada não substitui a última lista boa, nem com o cache invalidado');
   }
 
   console.log('\nroster\n' + results.join('\n') + `\n\n${results.length} verificações OK\n`);

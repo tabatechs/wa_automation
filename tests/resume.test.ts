@@ -41,11 +41,20 @@ const d1 = store.diffParticipants(G, ['a@c.us', 'b@c.us']);
 assert.deepStrictEqual([d1.firstRun, d1.added, d1.removed], [true, [], []]);
 ok('primeiro diff não inventa entradas, mesmo após o backfill mexer no checkpoint');
 
-// Lista vazia (metadados ainda não sincronizados) não pode apagar o que sabemos.
+// Lista vazia (metadados ainda não sincronizados) não pode apagar o que sabemos
+// nem virar diferença: o consumidor emite um `remove` por id devolvido aqui, e
+// um grupo inteiro "saindo" é sempre falha de sincronização, nunca um fato.
 const vazio = store.diffParticipants(G, []);
-assert.deepStrictEqual(vazio.removed, ['a@c.us', 'b@c.us'], 'reporta o diff da chamada');
-assert.deepStrictEqual(store.get(G).participantIds, ['a@c.us', 'b@c.us'], 'mas não grava vazio');
-ok('lista vazia não sobrescreve os participantes conhecidos');
+assert.deepStrictEqual([vazio.added, vazio.removed], [[], []], 'lista vazia não gera diff');
+assert.deepStrictEqual(store.get(G).participantIds, ['a@c.us', 'b@c.us'], 'nem grava vazio');
+ok('lista vazia não vira saída em massa nem sobrescreve os participantes conhecidos');
+
+// Mesma história com a lista quebrada que o WA Web devolve às vezes: tamanho
+// certo, contatos sem id. Os ids vazios não são pessoas e ficam de fora.
+const semId = store.diffParticipants(G, ['a@c.us', '', '', 'b@c.us']);
+assert.deepStrictEqual([semId.added, semId.removed], [[], []], 'id vazio não é participante');
+assert.deepStrictEqual(store.get(G).participantIds, ['a@c.us', 'b@c.us'], 'e não é gravado');
+ok('participante sem id é descartado em vez de virar entrada ou saída');
 
 const d2 = store.diffParticipants(G, ['b@c.us', 'c@c.us']);
 assert.deepStrictEqual(d2.added, ['c@c.us']);

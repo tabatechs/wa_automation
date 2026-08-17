@@ -56,6 +56,12 @@ function isJustANumber(value: string): boolean {
 export class Roster {
   private readonly contacts = new Map<string, CacheEntry<Actor>>();
   private readonly members = new Map<string, CacheEntry<ParticipantSnapshot[]>>();
+  /**
+   * Última lista que veio inteira, por grupo. Sem TTL e nunca sobrescrita por
+   * lista vazia: é a rede de segurança para quando o WA Web devolve lixo, e o
+   * que impede "o grupo inteiro saiu" de virar evento.
+   */
+  private readonly lastGoodMembers = new Map<string, ParticipantSnapshot[]>();
 
   private readonly lids: LidResolver;
   /** Chat id `@c.us` da conta conectada, para atribuir autoria das próprias mensagens. */
@@ -181,7 +187,24 @@ export class Roster {
       }
     }
 
+    // Nada utilizável agora: vale mais a última lista boa, mesmo velha, do que
+    // uma vazia. Quem consome isto compara com a execução anterior, e o vazio
+    // no lugar de 800 pessoas vira "o grupo inteiro saiu". O cache com TTL
+    // continua sem a lista, então a próxima chamada tenta de novo.
+    if (snapshot.length === 0) {
+      const ultimaBoa = this.lastGoodMembers.get(groupId);
+      if (ultimaBoa?.length) {
+        log.warn('lista de participantes indisponível; usando a última conhecida', {
+          groupId,
+          total: ultimaBoa.length,
+        });
+        return ultimaBoa;
+      }
+      return snapshot;
+    }
+
     this.members.set(groupId, { value: snapshot, expiresAt: Date.now() + this.ttlMs });
+    this.lastGoodMembers.set(groupId, snapshot);
     return snapshot;
   }
 
@@ -191,6 +214,24 @@ export class Roster {
       const contacts = await this.client.getGroupMembers(
         groupId as Parameters<Client['getGroupMembers']>[0],
       );
+
+      // Quando o `getGroupParticipantIDs` do WA Web falha ("group members ids
+      // is not an array / this.$1 is not a function"), o open-wa não propaga
+      // erro: devolve a lista com o tamanho certo e os contatos vazios, sem id.
+      // Uma lista assim é pior que nenhuma — os que perderam o id somem da
+      // comparação com a execução anterior e viram saída em massa (foi o que
+      // produziu 723 "saíram do grupo" falsos num grupo de 813). Descarta-se
+      // tudo: quem chamou refaz a busca ou fica com a última lista boa.
+      const semId = (contacts ?? []).filter((contact) => !String(contact?.id ?? '')).length;
+      if (semId > 0) {
+        log.warn('getGroupMembers devolveu participantes sem id; lista descartada', {
+          groupId,
+          total: contacts?.length ?? 0,
+          semId,
+        });
+        return [];
+      }
+
       // Os membros vêm como @c.us e podem carregar o LID correspondente:
       // é a fonte mais barata de vínculos para os eventos de mensagem.
       this.lids.learnFromContacts(contacts ?? []);

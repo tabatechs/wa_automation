@@ -15,6 +15,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { createLogger } from '../util/logger';
+import { localIso } from '../util/time';
 
 const log = createLogger('checkpoint');
 const STATE_VERSION = 1;
@@ -121,7 +122,7 @@ export class CheckpointStore {
       entry.lastMessageAt = at;
       entry.lastMessageId = messageId;
     }
-    entry.updatedAt = new Date().toISOString();
+    entry.updatedAt = localIso();
     this.dirty = true;
     return true;
   }
@@ -135,19 +136,26 @@ export class CheckpointStore {
     const entry = this.get(groupId);
     const firstRun = !entry.participantsSeen;
     const previous = new Set(entry.participantIds);
-    const current = new Set(currentIds);
+    // Id vazio é sintoma de metadado que não sincronizou, nunca uma pessoa.
+    // Deixá-lo entrar colapsava todos os quebrados num só elemento e a
+    // diferença acusava saída em massa.
+    const current = new Set(currentIds.filter((id) => id));
+
+    // Lista vazia é quase sempre metadado que ainda não sincronizou, não um
+    // grupo que esvaziou: não há diferença a reportar, e gravá-la faria a
+    // próxima execução acusar que o grupo inteiro entrou de novo.
+    if (current.size === 0) {
+      entry.updatedAt = localIso();
+      this.dirty = true;
+      return { added: [], removed: [], firstRun };
+    }
 
     const added = firstRun ? [] : [...current].filter((id) => !previous.has(id));
     const removed = firstRun ? [] : [...previous].filter((id) => !current.has(id));
 
-    // Uma lista vazia é quase sempre metadado que ainda não sincronizou, não um
-    // grupo que esvaziou. Gravá-la faria a próxima execução acusar que o grupo
-    // inteiro entrou de novo.
-    if (current.size > 0) {
-      entry.participantIds = [...current];
-      entry.participantsSeen = true;
-    }
-    entry.updatedAt = new Date().toISOString();
+    entry.participantIds = [...current];
+    entry.participantsSeen = true;
+    entry.updatedAt = localIso();
     this.dirty = true;
 
     return { added, removed, firstRun };
