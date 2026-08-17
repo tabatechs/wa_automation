@@ -20,7 +20,7 @@
 
 import type { Db, Document } from 'mongodb';
 import { createLogger } from '../util/logger';
-import { dateKey, dateKeyDaysAgo, daysBetween, TIMEZONE } from '../util/time';
+import { dateKey, dateKeyDaysAgo, daysBetween, localIso, TIMEZONE } from '../util/time';
 import { PENDING_PREFIX } from './identity';
 import { SCORING, tierOf } from './scoring';
 import type { MongoStore } from './client';
@@ -875,6 +875,13 @@ export class MetricsBuilder {
         // Quem quase não escreve mas reage: engajamento real que o volume
         // de mensagens sozinho não enxerga.
         isObserver: messagesSent <= SCORING.observerMaxMessages && reactionsGiven > 0,
+        // Espelhos legíveis dos campos de data. O BSON Date guarda instante e
+        // não fuso, então o Compass e o Atlas mostram tudo em UTC — três horas
+        // à frente, o que faz parecer que o valor veio do horário errado. As
+        // consultas continuam usando os `Date`, que são a fonte da verdade;
+        // estes campos existem para conferir à mão.
+        lastMessageAtLocal: lastMessageAt ? localIso(lastMessageAt) : null,
+        lastSeenAtLocal: person.lastSeenAt ? localIso(new Date(person.lastSeenAt)) : null,
         updatedAt: now,
       };
 
@@ -1028,6 +1035,12 @@ export class MetricsBuilder {
         messagesPrev7d: agg?.messagesPrev7d ?? 0,
         trend7d: trendOf(agg?.messagesLast7d ?? 0, agg?.messagesPrev7d ?? 0),
         daysSinceLastMessage: lastMessageAt ? daysBetween(lastMessageAt, now) : null,
+        // Ver o comentário em `refreshPeople`: espelho legível dos `Date`, que
+        // o Compass mostra em UTC. `lastMessageAt` vem do `sentAt` da mensagem;
+        // `lastEventAt` é qualquer evento, inclusive os que só têm o horário da
+        // captura (reação, leitura, mudança de participante).
+        lastMessageAtLocal: lastMessageAt ? localIso(lastMessageAt) : null,
+        lastEventAtLocal: group.lastEventAt ? localIso(new Date(group.lastEventAt)) : null,
         updatedAt: now,
       };
 

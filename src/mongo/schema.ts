@@ -100,6 +100,15 @@ export interface PersonDoc {
   lastMessageAt: Date | null;
 
   // --- campos derivados (preenchidos pelo recálculo agendado) ---
+  /**
+   * Espelhos legíveis dos `Date` acima, em ISO com o fuso de São Paulo.
+   *
+   * O `Date` do BSON guarda instante e não fuso, então o Compass e o Atlas
+   * mostram tudo em UTC — três horas à frente, o que faz parecer horário
+   * errado. Filtre e ordene pelos `Date`; leia estes.
+   */
+  lastMessageAtLocal?: string | null;
+  lastSeenAtLocal?: string | null;
   groupCount?: number;
   activeGroupCount?: number;
   avgMessageLength?: number;
@@ -178,10 +187,15 @@ export interface GroupDoc {
   hourHistogram: Record<string, number>;
   weekdayHistogram: Record<string, number>;
   firstEventAt: Date | null;
+  /** Qualquer evento, inclusive os que só têm o horário da captura. */
   lastEventAt: Date | null;
+  /** Vem do `sentAt` da mensagem, não do momento em que a capturamos. */
   lastMessageAt: Date | null;
 
   // --- campos derivados (recálculo agendado) ---
+  /** Espelhos legíveis dos `Date` acima — ver `PersonDoc.lastMessageAtLocal`. */
+  lastMessageAtLocal?: string | null;
+  lastEventAtLocal?: string | null;
   activeMembers7d?: number;
   activeMembers30d?: number;
   participationRate?: number;
