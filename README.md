@@ -164,6 +164,7 @@ como antes, gravando só o arquivo.
 npm run mongo:import   # carrega o JSONL que já existe (pode rodar quantas vezes quiser)
 npm run mongo:build    # recalcula as métricas derivadas
 npm run mongo:size     # quanto do plano gratuito já foi usado
+npm run mongo:migrate  # move grupos inteiros de um sufixo de coleção para outro
 ```
 
 O JSONL **continua sendo o log durável**. Se o Mongo cair, o monitor segue
@@ -171,9 +172,11 @@ gravando em disco e `mongo:import` recupera o intervalo depois.
 
 ### As coleções
 
-Todas nascem com o sufixo `MONGO_COLLECTION_SUFFIX` (`_teste` por padrão).
-Enquanto ele tiver valor, nada encosta em coleções de produção; para valer,
-esvazie a variável.
+Todas nascem com o sufixo `MONGO_COLLECTION_SUFFIX`. Vazio é produção
+(`people`, `groups`, …); qualquer valor manda a escrita para um conjunto
+separado (`people_teste`, …). Trocar de conjunto é só editar o `.env` — não há
+nada a mudar no código. Para levar junto o que já foi capturado, veja
+[Virar produção](#virar-produção).
 
 | Coleção | Um documento é | Para quê |
 |---|---|---|
@@ -267,25 +270,60 @@ Além de `participants[]`, `memberCount`, `joins`/`leaves` e os totais:
 
 ```js
 // Os 50 apoiadores mais engajados, com o que sustenta o número
-db.people_teste.find({ tier: { $in: ['champion', 'active'] } })
+db.people.find({ tier: { $in: ['champion', 'active'] } })
   .sort({ engagementScore: -1 }).limit(50)
   .project({ name: 1, phone: 1, ddd: 1, engagementScore: 1, tier: 1,
              messagesSent: 1, reactionsReceived: 1, activeDaysLast30: 1 })
 
 // Quem está esquentando agora — costuma valer mais que quem já foi ativo
-db.people_teste.find({ trend7d: 'rising', messagesLast7d: { $gte: 5 } })
+db.people.find({ trend7d: 'rising', messagesLast7d: { $gte: 5 } })
   .sort({ messagesLast7d: -1 })
 
 // Membros silenciosos de um grupo: invisíveis nas contagens, mas alcançáveis
-db.people_teste.find({ isLurker: true, 'groups.groupId': '1203...@g.us' })
+db.people.find({ isLurker: true, 'groups.groupId': '1203...@g.us' })
 
 // Quem repercute sem falar muito — o "observador" que vale um convite
-db.people_teste.find({ isObserver: true, reactionsGiven: { $gte: 10 } })
+db.people.find({ isObserver: true, reactionsGiven: { $gte: 10 } })
 
 // Série de mensagens por dia de um grupo
-db.activity_daily_teste.find({ groupId: '1203...@g.us', personId: null })
+db.activity_daily.find({ groupId: '1203...@g.us', personId: null })
   .sort({ date: 1 })
 ```
+
+### Virar produção
+
+Um conjunto de coleções é escolhido inteiramente pelo `.env` — o código não sabe
+qual é o "de verdade". A virada é uma linha:
+
+```ini
+MONGO_COLLECTION_SUFFIX=
+```
+
+O que já foi capturado não se move sozinho. `mongo:migrate` leva grupos
+escolhidos de um sufixo para outro:
+
+```bash
+npm run mongo:migrate -- --to= --dry-run 1203...@g.us   # só remonta o JSONL
+npm run mongo:migrate -- --to= 1203...@g.us 1203...@g.us
+```
+
+O que ele **não** faz é copiar documento. `messages` e `reactions` até
+poderiam ser filtradas por `groupId`, mas `people` não: uma pessoa é um
+documento só, somando todos os grupos em que aparece, e o que ela fez nos
+grupos que ficam para trás não teria como ser subtraído depois. Então o que
+migra é o evento: o log bruto dos grupos escolhidos é remontado num JSONL e
+passa pelo `Ingestor` normal, como se o monitor só tivesse visto aqueles grupos
+desde sempre. O JSONL fica em `data/migracao-<data>.jsonl`, reimportável como
+qualquer outro.
+
+Dois tipos de evento não estão no log bruto (ficam de fora por volume) e são
+reconstruídos do estado que restou: `message_read` sai de `message_reads`, e
+`group_snapshot` sai de `people.groups[]` — é ele que repõe `participants[]`,
+`memberCount` e `admins` no destino.
+
+Depois da migração, ajuste `MONITORED_GROUPS` para os grupos que passam a ser
+monitorados. A whitelist e o sufixo são independentes: esquecer dela faz o
+monitor gravar os grupos de teste dentro das coleções de produção.
 
 ### Orçamento de espaço no plano gratuito
 
@@ -407,7 +445,7 @@ Tudo em `.env` (veja `.env.example`):
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
 | `MONGODB_URI` | — | Vazio = Mongo desligado, grava só o JSONL. Contém senha: só no `.env` |
 | `MONGODB_DB` | `wa_monitor` | Banco de destino |
-| `MONGO_COLLECTION_SUFFIX` | `_teste` | Sufixo de todas as coleções. Esvazie para produção |
+| `MONGO_COLLECTION_SUFFIX` | `_teste` | Sufixo de todas as coleções. Vazio = produção |
 | `MONGO_RAW_LOG` | `true` | Grava também o log bruto (snapshots ficam de fora) |
 | `MONGO_RAW_LOG_TTL_DAYS` | `0` | `0` = nunca expira; `90` descarta log com mais de 90 dias |
 | `MONGO_FLUSH_MS` / `MONGO_FLUSH_MAX` | `2000` / `200` | Janela e tamanho do lote de escrita |
@@ -422,6 +460,7 @@ Tudo em `.env` (veja `.env.example`):
 | `npm run list-groups` | Lista os grupos da conta com seus ids; grava em `data/grupos.txt`. Aceita filtro: `-- parte-do-nome` |
 | `npm run compact` | Converte o JSONL num array `.json` |
 | `npm run mongo:import` | Carrega o JSONL no MongoDB; idempotente |
+| `npm run mongo:migrate` | Move grupos de um sufixo de coleção para outro (ver [Virar produção](#virar-produção)) |
 | `npm run mongo:build` | Recalcula as métricas; `-- --full` reconta tudo do zero |
 | `npm run mongo:size` | Uso do cluster vs. os 512 MB do plano gratuito |
 | `npm run probe-polls` | Verifica se enquetes são capturáveis nesta sessão |

@@ -66,6 +66,7 @@ npm run list-groups    # ids dos grupos; grava data/grupos.txt, aceita `-- filtr
 npm run compact        # JSONL -> JSON único
 npm run mongo:import   # carrega o JSONL no Mongo (idempotente)
 npm run mongo:build    # recalcula métricas; --full reconta tudo do zero
+npm run mongo:migrate  # move grupos de um sufixo de coleção para outro
 npm run mongo:size     # uso do cluster vs. os 512 MB do plano gratuito
 npm run probe-polls    # verifica se enquetes são capturáveis nesta sessão
 npm run probe-reads    # verifica se dá para saber quem leu as mensagens próprias
@@ -177,6 +178,18 @@ antiga em memória for **posterior** à última registrada no checkpoint, o log 
 `lacuna: o store não alcança a última mensagem registrada`, com os dois horários
 — é o intervalo que ninguém viu. Se o WhatsApp mudar de novo, o ponto de partida
 é `npm run probe-history`, não escrever rota nova dentro do coletor.
+
+**O sufixo das coleções é só `.env`.** `MONGO_COLLECTION_SUFFIX` vazio grava em
+`people`/`groups` (produção); com valor, num conjunto à parte (`people_teste`).
+Não há caminho de código que decida isso — todo nome passa por `store.name()`.
+Migrar o que já foi capturado de um conjunto para o outro é `mongo:migrate`, e
+ele **replica evento, não documento**: `people` é um documento por pessoa
+somando todos os grupos dela, e a parte vinda dos grupos que ficam para trás não
+teria como ser subtraída depois. O script remonta o log bruto dos grupos
+escolhidos num JSONL e passa pelo `Ingestor` normal. `message_read` e
+`group_snapshot` não estão no log bruto (ver `writeRawLog`) e são reconstruídos
+de `message_reads` e de `people.groups[]` — sem o segundo, o destino fica sem
+`participants[]`, `memberCount` e `admins`.
 
 **`eventId` não é chave.** É um UUID novo a cada emissão. Toda chave no Mongo é
 derivada do conteúdo, e é isso que permite reimportar o JSONL sem duplicar. Se

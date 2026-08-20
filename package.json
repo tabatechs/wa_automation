@@ -15,6 +15,7 @@
     "compact": "tsx src/scripts/compact.ts",
     "mongo:import": "tsx src/scripts/import-jsonl.ts",
     "mongo:build": "tsx src/scripts/build-metrics.ts",
+    "mongo:migrate": "tsx src/scripts/migrate-groups.ts",
     "mongo:size": "tsx src/scripts/mongo-size.ts",
     "probe-polls": "tsx src/scripts/probe-polls.ts",
     "probe-reads": "tsx src/scripts/probe-reads.ts",
