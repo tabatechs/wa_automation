@@ -44,9 +44,28 @@ export interface PersonGroupLink {
   lastMessageAt: Date | null;
 }
 
+/**
+ * De onde veio o documento de uma pessoa.
+ *
+ * `whatsapp` é quem o monitor observou — falou, reagiu ou apareceu na lista de
+ * participantes. `external` é registro criado por outra ferramenta (importação
+ * de planilha) para um número que ainda não foi visto em grupo nenhum: existe
+ * para ser pesquisável, mas **não é uma pessoa observada** e não pode entrar em
+ * nenhuma métrica. Documento antigo não tem o campo — por isso todo filtro usa
+ * `$ne: 'external'`, e não `$eq: 'whatsapp'`.
+ */
+export type PersonOrigin = 'whatsapp' | 'external';
+
+export const EXTERNAL_ORIGIN: PersonOrigin = 'external';
+
+/** Filtro que exclui os registros externos. Use em tudo que varre `people`. */
+export const OBSERVED_ONLY = { origin: { $ne: EXTERNAL_ORIGIN } } as const;
+
 export interface PersonDoc {
   /** Dígitos do E.164 (`5511988812345`) ou `lid:<id>` enquanto o número não aparece. */
   _id: string;
+  /** Ausente nos documentos anteriores a 22/08/2026; ausente = observado. */
+  origin?: PersonOrigin;
   phone: string | null;
   ddd: string | null;
   isInternational: boolean;

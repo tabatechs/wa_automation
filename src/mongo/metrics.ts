@@ -26,6 +26,7 @@ import { SCORING, tierOf } from './scoring';
 import type { MongoStore } from './client';
 import {
   COLLECTIONS,
+  OBSERVED_ONLY,
   newGroupCounters,
   newPersonCounters,
   type GroupDoc,
@@ -135,9 +136,20 @@ export class MetricsBuilder {
 
     // Contadores são somados; o recálculo logo em seguida reescreve os
     // derivados de qualquer jeito, mas os brutos precisam sobreviver à fusão.
+    //
+    // A lista do que pode ser somado vem de `newPersonCounters()`, e não de
+    // "todo campo numérico do documento". Somar às cegas era frágil de duas
+    // maneiras: um `engagementScore` de 40 mais um de 55 viraria 95 até o
+    // recálculo consertar, e — o que de fato morde — qualquer campo numérico
+    // gravado por outra ferramenta no documento (uma coluna de planilha
+    // importada, por exemplo) seria **somado** em vez de preservado, corrompendo
+    // em silêncio um dado que o monitor nem sabe interpretar. A allowlist se
+    // mantém sozinha: contador novo entra em `newPersonCounters()` e passa a
+    // ser somado; qualquer outra coisa fica de fora por padrão.
+    const somaveis = new Set(Object.keys(newPersonCounters()));
     const inc: Record<string, number> = {};
     for (const [key, value] of Object.entries(source)) {
-      if (typeof value === 'number' && key !== '__v') inc[key] = value;
+      if (typeof value === 'number' && somaveis.has(key)) inc[key] = value;
     }
     for (const [bucket, value] of Object.entries(source.hourHistogram ?? {})) {
       inc[`hourHistogram.${bucket}`] = value;
@@ -830,7 +842,10 @@ export class MetricsBuilder {
     people: import('mongodb').Collection<PersonDoc>,
   ): Promise<number> {
     const now = new Date();
-    const cursor = people.find({});
+    // Registro de planilha não é pessoa observada: não recebe derivado,
+    // sinalizador nem `tier`. Sem este filtro ele sairia daqui carimbado como
+    // se fosse alguém que está no grupo e nunca falou.
+    const cursor = people.find(OBSERVED_ONLY);
     const ops: Document[] = [];
     let total = 0;
 
@@ -1128,7 +1143,7 @@ export class MetricsBuilder {
 
     // Silenciosos: score zero, mas o tier continua distinguindo lurker de
     // dormant — é o tier que responde "dá para convidar?".
-    await people.updateMany({ $nor: [participa] }, [
+    await people.updateMany({ ...OBSERVED_ONLY, $nor: [participa] }, [
       {
         $set: {
           engagementScore: 0,
@@ -1140,7 +1155,7 @@ export class MetricsBuilder {
     ]);
 
     const all = await people
-      .find(participa)
+      .find({ ...OBSERVED_ONLY, ...participa })
       .project<{
         _id: string;
         messagesSent?: number;

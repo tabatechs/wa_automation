@@ -56,6 +56,10 @@ coletores  →  ctx.emit()  →  Sink  →  JSONL (durável)
 O JSONL é sempre a fonte durável. O Mongo é destino secundário: se ele cair, o
 monitor continua gravando em disco e `npm run mongo:import` recupera depois.
 
+`docs/METRICAS.md` é o dicionário de dados: cada campo de `people` e `groups`,
+como é calculado e o que responde. Mexeu na definição de uma métrica, atualize
+lá — inclusive a seção dos campos que ainda não são preenchidos.
+
 ## Comandos
 
 ```bash
@@ -190,6 +194,21 @@ escolhidos num JSONL e passa pelo `Ingestor` normal. `message_read` e
 `group_snapshot` não estão no log bruto (ver `writeRawLog`) e são reconstruídos
 de `message_reads` e de `people.groups[]` — sem o segundo, o destino fica sem
 `participants[]`, `memberCount` e `admins`.
+
+**Nem todo documento de `people` é uma pessoa observada.** A importação de
+planilha (repositório `tabatech_monitor`) cria documentos com
+`origin: 'external'` para números que nunca apareceram em grupo. Todo estágio
+que varre `people` inteira precisa excluí-los — hoje `finalizePeople` e
+`scoreAndTier`, via `OBSERVED_ONLY` de `schema.ts`. **Estágio novo que use
+`people.find({})` sem esse filtro carimba `tier: 'lurker'` em registro de
+planilha e estraga qualquer contagem de silenciosos.** O caminho quente grava
+`origin: 'whatsapp'` em `$set` (não `$setOnInsert`): quando a pessoa aparece de
+verdade, o mesmo documento é adotado e os campos da planilha sobrevivem.
+
+**A fusão de identidade só soma o que está em `newPersonCounters()`.** O laço de
+`drainPerson` tinha uma allowlist implícita perigosa — "todo campo numérico" —
+que somaria colunas numéricas de planilha em vez de preservá-las. Contador novo
+precisa entrar em `newPersonCounters()` para ser somado numa fusão.
 
 **`eventId` não é chave.** É um UUID novo a cada emissão. Toda chave no Mongo é
 derivada do conteúdo, e é isso que permite reimportar o JSONL sem duplicar. Se

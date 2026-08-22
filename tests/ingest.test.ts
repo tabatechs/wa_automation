@@ -508,6 +508,49 @@ async function run() {
     ok('identidade prefere telefone e guarda os dois ids como alias');
   }
 
+  // === 11. origem: registro de planilha vira pessoa observada ao aparecer ===
+  {
+    const store = new FakeStore();
+    const ingestor = new Ingestor(store as never, true);
+
+    // O painel de planilhas cria o documento antes de a pessoa falar: mesmo
+    // `_id` (o telefone), marcado como externo, com uma coluna importada.
+    const people = await store.collection('people');
+    people.docs.set('5511988812345', {
+      _id: '5511988812345',
+      origin: 'external',
+      apoio2026_bairro: 'Butantã',
+    });
+
+    await ingestor.apply([message('m1')]);
+    const doc = people.docs.get('5511988812345');
+
+    assert.strictEqual(
+      doc?.origin,
+      'whatsapp',
+      'ao ser observada, a pessoa deixa de ser registro externo',
+    );
+    assert.strictEqual(
+      doc?.apoio2026_bairro,
+      'Butantã',
+      'o campo vindo da planilha sobrevive ao caminho quente',
+    );
+    assert.strictEqual(people.counter('5511988812345', 'messagesSent'), 1);
+    ok('doc externo com o mesmo telefone é adotado, não duplicado nem apagado');
+  }
+
+  // === 12. quem o monitor cria já nasce observado ===
+  {
+    const store = new FakeStore();
+    const ingestor = new Ingestor(store as never, true);
+    await ingestor.apply([message('m1')]);
+    assert.strictEqual(
+      store.get('people').docs.get('5511988812345')?.origin,
+      'whatsapp',
+    );
+    ok('pessoa criada pelo monitor nasce com origin whatsapp');
+  }
+
   console.log('\ningest\n' + results.join('\n') + `\n\n${results.length} verificações OK\n`);
 }
 

@@ -251,7 +251,14 @@ class PersonAccumulator {
   }
 
   toOp(): AnyBulkWriteOperation<PersonDoc> {
-    const set: Document = { updatedAt: new Date() };
+    // `origin` vai em `$set`, e não em `$setOnInsert`, de propósito: a
+    // importação de planilha cria documentos `external` com o mesmo `_id` que
+    // esta pessoa teria (o telefone). Quando ela finalmente aparece num grupo,
+    // o upsert encontra o documento já existente — um `$setOnInsert` não
+    // dispararia, o marcador de planilha sobreviveria e a pessoa ficaria fora
+    // das métricas para sempre. Escrito a cada evento, a regra é simples: se o
+    // monitor observou, é observada, e os campos de planilha continuam ali.
+    const set: Document = { updatedAt: new Date(), origin: 'whatsapp' };
     // Só sobrescreve identidade quando há valor: um evento sem nome não pode
     // apagar o nome que outro evento já resolveu.
     if (this.identity.name) {

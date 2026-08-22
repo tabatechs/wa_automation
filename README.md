@@ -170,6 +170,10 @@ npm run mongo:migrate  # move grupos inteiros de um sufixo de coleção para out
 O JSONL **continua sendo o log durável**. Se o Mongo cair, o monitor segue
 gravando em disco e `mongo:import` recupera o intervalo depois.
 
+> **[`docs/METRICAS.md`](docs/METRICAS.md) é o dicionário de dados completo**:
+> todo campo de todas as coleções, com a fórmula exata e para que serve na
+> decisão de quem convidar. O que vem abaixo é o resumo.
+
 ### As coleções
 
 Todas nascem com o sufixo `MONGO_COLLECTION_SUFFIX`. Vazio é produção
