@@ -21,6 +21,7 @@ import { ParticipantsCollector } from './collectors/participants';
 import { ReactionsCollector } from './collectors/reactions';
 import { ReadReceiptsCollector } from './collectors/readReceipts';
 import { BackfillCollector } from './collectors/backfill';
+import { patchMessageSerializer } from './util/page';
 import { CheckpointStore } from './state/checkpoint';
 import { emitGroupSnapshot } from './collectors/groupSnapshot';
 import type { Collector, CollectorContext } from './collectors/Collector';
@@ -101,6 +102,11 @@ async function main(): Promise<void> {
   let shuttingDown = false;
 
   const wire = async (client: Client): Promise<void> => {
+    // Antes de qualquer coletor: sem o remendo, `getAllMessagesInChat` morre
+    // inteiro na primeira mensagem que cita outra, e o backfill e as reações
+    // não devolvem nada. Ver `patchMessageSerializer` em util/page.ts.
+    await patchMessageSerializer(safePage(client));
+
     const ctx = buildContext(client, config, sink, checkpoint);
     // Descobre o número da própria conta antes de qualquer coletor, senão as
     // mensagens enviadas por você sairiam sem autor.
@@ -184,6 +190,18 @@ function buildContext(
   };
 }
 
+/**
+ * A página do puppeteer, ou null. `getPage()` lança quando a sessão ainda não
+ * terminou de subir, e isso não pode custar o boot.
+ */
+function safePage(client: Client): unknown {
+  try {
+    return client.getPage();
+  } catch {
+    return null;
+  }
+}
+
 /** Registra transições de estado da sessão (CONNECTED, DISCONNECTED, ...). */
 async function registerStateListener(ctx: CollectorContext): Promise<void> {
   let previous: string | null = null;
@@ -199,6 +217,15 @@ async function registerStateListener(ctx: CollectorContext): Promise<void> {
     };
     previous = state;
     log.info('estado da sessão', { state });
+
+    // Uma reconexão recarrega a página e o WA Web reinjeta o WAPI original —
+    // o remendo do serializador se perderia em silêncio, e o backfill voltaria
+    // a morrer na primeira mensagem citada. Reaplicar é barato: o próprio
+    // código injetado desiste com 'ja-aplicado' quando ainda está no lugar.
+    if (state === 'CONNECTED') {
+      await patchMessageSerializer(safePage(ctx.client));
+    }
+
     await ctx.emit(event);
   });
 }

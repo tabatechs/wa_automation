@@ -9,7 +9,7 @@
  */
 import assert from 'node:assert';
 
-import { preparePage } from '../src/util/page';
+import { preparePage, SERIALIZER_SHIM } from '../src/util/page';
 
 const results: string[] = [];
 function ok(name: string) { results.push(`  ✓ ${name}`); }
@@ -81,7 +81,105 @@ async function run() {
     ok('sem página, devolve false');
   }
 
-  console.log('\npage\n' + results.join('\n') + `\n\n${results.length} verificações OK\n`);
+  // --- remendo do serializador (quotedMsgObj) --------------------------------
+
+/**
+ * Reproduz o serializador da 4.76.0 e o model quebrado do WA Web atual, para
+ * exercitar o remendo sem browser: `quotedMsgObj` é propriedade, não método, e
+ * o serializador a chama descartando o retorno.
+ */
+function fakeWapi() {
+  const chamadas: string[] = [];
+  const original = (obj: any) => {
+    if (!obj) return null;
+    chamadas.push(obj.id);
+    // A linha exata do wapi.js:131 — chamada com retorno descartado.
+    if (obj.quotedMsg) obj.quotedMsgObj();
+    return { id: obj.id, quotedMsgId: obj.quotedMsg?.id ?? null };
+  };
+  return { _serializeMessageObj: original, chamadas };
+}
+
+function aplicarShim(wapi: unknown): string {
+  const janela = { WAPI: wapi } as Record<string, unknown>;
+  // O shim referencia `window`; em Node damos um à mão.
+  const fn = new Function('window', `return ${SERIALIZER_SHIM};`);
+  return fn(janela) as string;
+}
+
+/** Mensagem que cita outra, com `quotedMsgObj` como propriedade (o caso novo). */
+function mensagemCitando(id: string) {
+  return {
+    id,
+    quotedMsg: { id: 'ABC123' },
+    quotedMsgObj: { id: 'ABC123', body: 'a citada' }, // propriedade, não função
+  };
+}
+
+{
+  // Sem o remendo, o serializador estoura exatamente como em produção.
+  const wapi = fakeWapi();
+  assert.throws(
+    () => wapi._serializeMessageObj(mensagemCitando('m1')),
+    /is not a function/,
+    'o cenário de produção é reproduzido',
+  );
+  ok('sem remendo, mensagem citada quebra o serializador');
+}
+
+{
+  const wapi = fakeWapi();
+  assert.strictEqual(aplicarShim(wapi), 'aplicado');
+
+  const msg = mensagemCitando('m1');
+  const saida = wapi._serializeMessageObj(msg) as { quotedMsgId: string | null };
+  assert.strictEqual(saida.quotedMsgId, 'ABC123', 'quotedMsgId sobrevive — é o que usamos');
+  ok('com o remendo, mensagem citada serializa e mantém quotedMsgId');
+
+  // O model tem de voltar exatamente como estava: se o WA Web ler
+  // `quotedMsgObj` esperando o objeto, uma função no lugar quebraria a página.
+  assert.deepStrictEqual(
+    msg.quotedMsgObj,
+    { id: 'ABC123', body: 'a citada' },
+    'o descritor original é restaurado depois da serialização',
+  );
+  ok('o remendo não deixa resíduo no model do WhatsApp');
+}
+
+{
+  // Um lote com uma única resposta no meio: é o que derruba getAllMessagesInChat.
+  const wapi = fakeWapi();
+  aplicarShim(wapi);
+  const lote = [{ id: 'a', quotedMsg: null }, mensagemCitando('b'), { id: 'c', quotedMsg: null }];
+  const saida = lote.map((m) => wapi._serializeMessageObj(m));
+  assert.strictEqual(saida.length, 3);
+  assert.strictEqual(wapi.chamadas.length, 3, 'nenhuma mensagem é chamada duas vezes');
+  ok('lote inteiro sobrevive a uma resposta no meio');
+}
+
+{
+  const wapi = fakeWapi();
+  assert.strictEqual(aplicarShim(wapi), 'aplicado');
+  assert.strictEqual(aplicarShim(wapi), 'ja-aplicado', 'não embrulha duas vezes');
+  ok('remendo é idempotente');
+}
+
+{
+  // Se um dia a biblioteca ou o WhatsApp consertarem, o remendo sai do caminho.
+  const wapi = fakeWapi();
+  aplicarShim(wapi);
+  const msg = { id: 'm1', quotedMsg: { id: 'X' }, quotedMsgObj: () => ({ id: 'X' }) };
+  assert.doesNotThrow(() => wapi._serializeMessageObj(msg));
+  assert.strictEqual(typeof msg.quotedMsgObj, 'function', 'método intacto');
+  ok('quando quotedMsgObj volta a ser método, o remendo não interfere');
+}
+
+{
+  assert.strictEqual(aplicarShim({}), 'sem-wapi', 'sem serializador, desiste em silêncio');
+  ok('WAPI ausente não vira exceção');
+}
+
+console.log('\npage\n' + results.join('\n') + `\n\n${results.length} verificações OK\n`);
 }
 
 run().catch((e) => { console.error(e); process.exit(1); });

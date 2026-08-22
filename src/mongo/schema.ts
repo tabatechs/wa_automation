@@ -61,6 +61,16 @@ export const EXTERNAL_ORIGIN: PersonOrigin = 'external';
 /** Filtro que exclui os registros externos. Use em tudo que varre `people`. */
 export const OBSERVED_ONLY = { origin: { $ne: EXTERNAL_ORIGIN } } as const;
 
+/**
+ * Um documento de pessoa.
+ *
+ * **Todo campo aqui é camelCase, sem `_`, e isso não é só estilo.** O painel de
+ * planilhas (repositório `tabatech_monitor`) grava campos seus neste mesmo
+ * documento, nomeados `<slugDaPlanilha>_<slugDaColuna>` — e o `_` é a fronteira
+ * que torna a colisão impossível. Acrescentar aqui um campo com `_` no nome
+ * derruba essa garantia e abre caminho para uma planilha sobrescrever métrica
+ * em silêncio. Se algum dia for inevitável, avise o outro lado antes.
+ */
 export interface PersonDoc {
   /** Dígitos do E.164 (`5511988812345`) ou `lid:<id>` enquanto o número não aparece. */
   _id: string;

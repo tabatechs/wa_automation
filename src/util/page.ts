@@ -57,3 +57,98 @@ export async function preparePage(page: unknown): Promise<boolean> {
     return false;
   }
 }
+
+/**
+ * Remendo para `WAPI._serializeMessageObj`, quebrado pelo WhatsApp Web atual.
+ *
+ * ## O problema
+ *
+ * Em `node_modules/@open-wa/wa-automate/dist/lib/wapi.js:131` o serializador faz:
+ *
+ *     if (obj.quotedMsg) obj.quotedMsgObj();
+ *
+ * `quotedMsgObj` deixou de ser método no model de mensagem do WA Web — virou
+ * propriedade —, e a chamada estoura `TypeError: obj.quotedMsgObj is not a
+ * function`. A biblioteca depende de engenharia reversa e quebra a cada
+ * mudança da Meta; a 4.76.0 é a última publicada (08/07/2026) e não corrige,
+ * e a linha 5.0.0-alpha é um esqueleto sem WAPI. Não há atualização a fazer.
+ *
+ * ## Por que derruba o monitor inteiro
+ *
+ * A chamada só acontece quando a mensagem **cita outra** — mas ela não está
+ * protegida, e `getAllMessagesInChat` serializa o lote inteiro de uma vez.
+ * Basta **uma** resposta na janela para a varredura toda morrer. Como todo
+ * grupo vivo tem respostas, na prática o backfill e o coletor de reações param
+ * de devolver qualquer coisa, e `onAnyMessage` perde as mensagens citadas.
+ *
+ * ## O contorno
+ *
+ * O retorno de `obj.quotedMsgObj()` é **descartado** pelo próprio serializador:
+ * a chamada existia só pelo efeito colateral de popular `_quotedMsgObj`. E nada
+ * neste projeto lê o objeto da mensagem citada — `quotedMsgId` sai de
+ * `message.quotedMsg.id`, que é propriedade crua e continua intacta. Então
+ * basta tornar a chamada inofensiva.
+ *
+ * O remendo instala a função só durante a serialização e **restaura o
+ * descritor original no `finally`**. Mexer de forma permanente no model seria
+ * arriscado: se o próprio WA Web ler `msg.quotedMsgObj` esperando o objeto,
+ * uma função no lugar quebraria a interface.
+ */
+export const SERIALIZER_SHIM = `(function () {
+  var W = window.WAPI;
+  if (!W || typeof W._serializeMessageObj !== 'function') return 'sem-wapi';
+  if (W.__quotedMsgObjPatched) return 'ja-aplicado';
+
+  var original = W._serializeMessageObj;
+  var inocua = function () { return undefined; };
+
+  W._serializeMessageObj = function (obj) {
+    if (!obj || typeof obj !== 'object') return original.call(this, obj);
+
+    var atual;
+    try { atual = obj.quotedMsgObj; } catch (e) { atual = undefined; }
+    if (typeof atual === 'function') return original.call(this, obj);
+
+    var descritor = Object.getOwnPropertyDescriptor(obj, 'quotedMsgObj');
+    var instalado = false;
+    try {
+      Object.defineProperty(obj, 'quotedMsgObj', {
+        value: inocua, configurable: true, writable: true, enumerable: false
+      });
+      instalado = true;
+    } catch (e) { /* objeto selado: falha como falhava, sem piorar */ }
+
+    try {
+      return original.call(this, obj);
+    } finally {
+      if (instalado) {
+        if (descritor) Object.defineProperty(obj, 'quotedMsgObj', descritor);
+        else { try { delete obj.quotedMsgObj; } catch (e) {} }
+      }
+    }
+  };
+
+  W.__quotedMsgObjPatched = true;
+  return 'aplicado';
+})()`;
+
+/**
+ * Aplica o remendo acima. Idempotente: o próprio código injetado desiste se já
+ * estiver aplicado, e reinstala sozinho se o WAPI for reinjetado (reconexão).
+ *
+ * Nunca lança: sem o remendo o monitor perde mensagem citada, mas com uma
+ * exceção aqui ele não sobe.
+ */
+export async function patchMessageSerializer(page: unknown): Promise<string | null> {
+  if (!page || typeof page !== 'object') return null;
+  try {
+    const resultado = await (page as PageLike).evaluate(SERIALIZER_SHIM);
+    const estado = typeof resultado === 'string' ? resultado : 'desconhecido';
+    if (estado === 'aplicado') log.info('remendo do serializador aplicado (quotedMsgObj)');
+    else if (estado === 'sem-wapi') log.warn('WAPI ausente; remendo do serializador não aplicado');
+    return estado;
+  } catch (error) {
+    log.error('falha ao aplicar o remendo do serializador', error);
+    return null;
+  }
+}

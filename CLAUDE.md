@@ -108,6 +108,22 @@ dois ou três documentos e todas as métricas se dividem.
 na v4. Por isso reações são capturadas por *polling* com diff
 (`collectors/reactions.ts`), não por listener.
 
+**O serializador do open-wa quebrou, e o remendo é nosso.** A 4.76.0 chama
+`obj.quotedMsgObj()` em `dist/lib/wapi.js:131`; no WA Web atual isso é
+propriedade, não método, e toda mensagem que **cita outra** estoura
+`TypeError: obj.quotedMsgObj is not a function`. Como `getAllMessagesInChat`
+serializa o lote inteiro, **uma** resposta na janela derruba a varredura toda —
+o backfill e as reações param de devolver qualquer coisa. Não há para onde
+atualizar: a 4.76.0 é a última publicada (08/07/2026) e a linha `5.0.0-alpha`
+é um esqueleto sem WAPI. `patchMessageSerializer()` em `src/util/page.ts`
+embrulha o serializador, torna a chamada inofensiva e **restaura o descritor
+original no `finally`** — mexer de forma permanente no model seria arriscado se
+o próprio WA Web ler `quotedMsgObj` esperando o objeto. É aplicado no `wire()` e
+reaplicado a cada `CONNECTED`, porque uma reconexão reinjeta o WAPI original.
+Nada aqui lê o objeto da citada: `quotedMsgId` sai de `message.quotedMsg.id`,
+que é propriedade crua. Se a biblioteca consertar, o remendo sai do caminho
+sozinho (detecta que voltou a ser método).
+
 **`page.evaluate` quebra com tsx.** O esbuild embrulha funções nomeadas num
 helper `__name` que só existe no processo Node; o puppeteer envia o
 *código-fonte* da função para o browser, e lá o helper não existe —

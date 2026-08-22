@@ -34,6 +34,21 @@
  *   grupo é exatamente quem tem vínculo ativo com ele. É o único caminho, e é
  *   o que repõe `memberCount`, `participants[]` e `admins` no destino.
  *
+ * ## O que a remontagem NÃO carrega: campo escrito por outra ferramenta
+ *
+ * O destino é reconstruído a partir de **eventos do monitor**. Qualquer coisa
+ * que outro sistema tenha gravado em `people` não tem evento correspondente e
+ * portanto não atravessa: as colunas de planilha (`<planilha>_<coluna>`,
+ * escritas pelo painel do `tabatech_monitor`) e os documentos `origin:
+ * 'external'`, que por definição são de números nunca vistos em grupo nenhum e
+ * não têm evento algum.
+ *
+ * Isso morde exatamente na virada de `_teste` para produção: o painel escreve
+ * no sufixo que o `.env` dele aponta, e migrar os grupos **não** leva esse dado
+ * junto. Quem fizer a virada precisa copiar esses campos à parte, ou combinar
+ * de repetir a importação das planilhas contra o sufixo novo. Não há como o
+ * replay adivinhar o que ele nunca viu.
+ *
  * O que não sobrevive à remontagem é o `capturedAt` original desses dois: o do
  * snapshot vira o primeiro evento conhecido do grupo (era o boot, na prática) e
  * o da leitura vira o próprio `readAt`. Nenhum dos dois entra em métrica — o
