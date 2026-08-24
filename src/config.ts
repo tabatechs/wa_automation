@@ -50,6 +50,17 @@ const envSchema = z.object({
   REACTION_WINDOW_SIZE: z.coerce.number().int().positive().default(2_000),
   REACTION_WINDOW_HOURS: z.coerce.number().positive().default(48),
   ROSTER_TTL_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),
+  // --- Vigia da sessão ---
+  // Com que frequência conferir se a página do WhatsApp continua sendo a mesma.
+  // Barato: um `evaluate` com uma comparação de string.
+  WATCHDOG_MS: z.coerce.number().int().min(5_000).default(30_000),
+  // Rodadas seguidas sem conseguir religar antes de derrubar o processo e
+  // deixar o supervisor (systemd) subir de novo.
+  WATCHDOG_MAX_FAILURES: z.coerce.number().int().min(1).default(3),
+  // Uma linha periódica com o que foi capturado desde o batimento anterior.
+  // Existe para que silêncio prolongado seja visível no log — foi a ausência
+  // disso que deixou três horas de cegueira passarem despercebidas.
+  HEARTBEAT_MS: z.coerce.number().int().min(60_000).default(10 * 60 * 1000),
   // --- Confirmações de leitura das mensagens próprias ---
   READ_RECEIPTS_ENABLED: z
     .string()
@@ -124,6 +135,9 @@ export interface AppConfig {
   reactionWindowSize: number;
   reactionWindowMs: number;
   rosterTtlMs: number;
+  watchdogMs: number;
+  watchdogMaxFailures: number;
+  heartbeatMs: number;
   readReceiptsEnabled: boolean;
   readReceiptPollMs: number;
   readReceiptWindowMs: number;
@@ -190,6 +204,9 @@ export function loadConfig(): AppConfig {
       env.BACKFILL_DAYS * 24 * 60 * 60 * 1000,
     ),
     rosterTtlMs: env.ROSTER_TTL_MS,
+    watchdogMs: env.WATCHDOG_MS,
+    watchdogMaxFailures: env.WATCHDOG_MAX_FAILURES,
+    heartbeatMs: env.HEARTBEAT_MS,
     readReceiptsEnabled: env.READ_RECEIPTS_ENABLED,
     readReceiptPollMs: env.READ_RECEIPT_POLL_MS,
     readReceiptWindowMs: env.READ_RECEIPT_WINDOW_HOURS * 60 * 60 * 1000,

@@ -48,6 +48,10 @@ coletores  →  ctx.emit()  →  Sink  →  JSONL (durável)
   LID→`@c.us`; `messageInfo.ts` lê os "dados da mensagem" (quem leu) pelo store.
 - `src/state/checkpoint.ts` — dedupe de mensagens e ponto de retomada entre
   execuções.
+- `src/util/watchdog.ts` — o vigia da sessão. Detecta que a página do
+  WhatsApp navegou (e portanto que os listeners morreram) e os religa; ver a
+  armadilha correspondente. A sonda que conhece as entranhas do open-wa é
+  `createSessionProbe()`, em `src/session.ts`.
 - `src/util/time.ts` — o fuso do projeto. `localIso()` carimba todo evento e
   todo log em São Paulo (`…-03:00`); `timeParts()`/`dateKey()` fazem os buckets
   diários e por hora. Não use `toISOString()` em nada que seja gravado ou lido
@@ -72,6 +76,7 @@ npm run mongo:import   # carrega o JSONL no Mongo (idempotente)
 npm run mongo:build    # recalcula métricas; --full reconta tudo do zero
 npm run mongo:migrate  # move grupos de um sufixo de coleção para outro
 npm run mongo:size     # uso do cluster vs. os 512 MB do plano gratuito
+npm run mongo:fix-members # remove member_events sem pessoa; --apply executa
 npm run probe-polls    # verifica se enquetes são capturáveis nesta sessão
 npm run probe-reads    # verifica se dá para saber quem leu as mensagens próprias
 ```
@@ -104,6 +109,48 @@ sufixo, e `src/mongo/identity.ts` unifica pelo telefone. Quem mexer em
 resolução de ator precisa manter isso — sem essa unificação, cada apoiador vira
 dois ou três documentos e todas as métricas se dividem.
 
+**Navegação de página mata os listeners, e o open-wa não os religa.** Foi a
+falha mais cara até hoje: em 24/08/2026 o monitor passou três horas capturando
+**nada**, com o processo vivo, o Mongo respondendo e o recálculo de métricas no
+horário — sem uma linha de erro.
+
+Cada listener do open-wa tem duas metades. A do Node é uma função exposta pelo
+puppeteer (`page.exposeFunction('onMessage', ...)`); a do browser é a ligação com
+o store (`WAPI.waitNewMessages(obj => window.onMessage(obj))`), feita **uma única
+vez**, no registro. Quando a página navega, a metade do Node sobrevive —
+`exposeFunction` reinstala em todo documento novo — e a do browser morre com o
+`window` antigo. O handler de `framenavigated` (`controllers/browser.js:97`)
+reinjeta o WAPI e **só isso**; quem chama `_reRegisterListeners()` é apenas o
+`Client.refresh()`, que não roda nesse caminho.
+
+O diagnóstico é assimétrico e serve de assinatura: **chamada sob demanda
+continua funcionando, listener não**. As reações (polling) voltaram ao normal
+sozinhas; mensagens, participantes e `session_state` nunca mais chegaram. Se o
+log tiver `getAllMessagesInChat falhou ... reading 'msgs'` por alguns minutos e
+depois silêncio, é isto: o erro do `msgs` é só o `Store.Chat` ainda vazio logo
+depois da navegação (`wapi.js:672` faz `WAPI.getChat(id).msgs._models` sem `if`).
+
+`src/util/watchdog.ts` é a defesa. Ele carimba um selo no `window` depois de
+registrar os listeners; **navegação zera o `window` inteiro**, então a ausência
+do selo é prova do mesmo evento que matou os listeners — não é heurística. Ao
+detectar, força `_refreshing = true` (sem isso a guarda em `Client.js:648`
+devolve `true` sem religar nada) e chama `_reRegisterListeners()`. Depois de
+`WATCHDOG_MAX_FAILURES` rodadas sem recuperar, sai com código 1 para o systemd
+subir de novo.
+
+Duas consequências para quem mexer aqui. **Reiniciar por tempo não substitui o
+vigia**: o processo nunca morre nessa falha, então `Restart=always` nunca
+dispara. E **nada que dependa do estado da página pode ser pendurado só no
+`onStateChanged`** — foi o que aconteceu com a reaplicação do remendo do
+serializador, que era acionada só no `CONNECTED` e portanto morria junto com o
+primeiro listener. Ela continua lá, mas agora também mora no `carimbar()` da
+sonda — que roda justamente quando a página é nova, e não depende de listener
+nenhum para ser chamado.
+
+O batimento (`HEARTBEAT_MS`) existe pelo mesmo motivo: sem uma linha periódica
+dizendo quanto entrou, silêncio total é indistinguível de "os grupos estão
+quietos".
+
 **Listeners pagos.** `onReaction` e `onGroupChange` são `{@license:insiders@}`
 na v4. Por isso reações são capturadas por *polling* com diff
 (`collectors/reactions.ts`), não por listener.
@@ -130,7 +177,36 @@ helper `__name` que só existe no processo Node; o puppeteer envia o
 `ReferenceError: __name is not defined`. Isso manteve o `queryStore` do
 `LidResolver` quebrado em silêncio por meses, absorvido pelo `try/catch`.
 **Chame `preparePage(page)` de `src/util/page.ts` antes de qualquer
-`page.evaluate` com função.**
+`page.evaluate` com função.** E ele **não pode memorizar quais páginas já
+preparou**: o objeto `Page` do puppeteer sobrevive a uma navegação, só o `window`
+dentro dele é trocado. Um `WeakSet` de páginas prontas — que existiu aqui —
+responde "já preparei" enquanto o `__name` foi embora com o documento antigo, e o
+bug ressuscita a cada reconexão, de novo em silêncio. O sintoma no banco é gente
+ativa que continua com `_id` de `@lid` e nunca ganha telefone, porque a ponte em
+`src/enrich/lid.ts` é `page.evaluate` com função.
+
+**O tipo de `who` no evento de participantes mente.** O
+`ParticipantChangedEventModel` do open-wa declara `who: string[]`, mas o
+`WAPI.onGlobalParicipantsChanged` embutido (`dist/lib/wapi.js:1238` — repare no
+typo do nome, que é da biblioteca) chama o callback com uma **string**:
+
+```js
+callback({ by: undefined, action, who: eventData.id._serialized, chat: ... })
+```
+
+Ler só array fazia `Array.isArray` dar false, a lista virava `[]` e **todo**
+evento de entrada e saída ao vivo era gravado sem pessoa (`personId: null`).
+Descoberto em 24/08/2026 pela divisão perfeita nos dados: 96 eventos ao vivo sem
+pessoa, 66 de reconciliação com pessoa — a reconciliação usa a lista de
+participantes, que traz `@c.us`.
+
+`participantIds()` e `extractId()` em `src/collectors/participants.ts` aceitam
+string, array, Wid (`{_serialized}`) e participante aninhado
+(`{id:{_serialized}}`). Quem tocar em campo de id vindo do WAPI deve assumir a
+mesma postura: **o tipo declarado não é evidência**. Os fantasmas já gravados
+saem com `npm run mongo:fix-members` — que também desfaz a inflação em
+`groups.joins`/`leaves`, porque `countMemberEvent` soma `Math.max(who.length, 1)`
+e o `mongo:build --full` não recalcula esses dois contadores.
 
 **Votos de enquete não existem para um aparelho conectado.** Verificado com
 sessão real: `__x_pollVotesSnapshot` é `{pollVotes: []}` e `Store.PollVote` fica

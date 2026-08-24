@@ -8,7 +8,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Client } from '@open-wa/wa-automate';
 import { loadConfig, type AppConfig } from './config';
-import { startSession, stopSession } from './session';
+import { createSessionProbe, safePage, startSession, stopSession } from './session';
 import { Roster } from './enrich/roster';
 import { JsonlSink } from './sink/JsonlSink';
 import { MongoSink } from './sink/MongoSink';
@@ -22,6 +22,7 @@ import { ReactionsCollector } from './collectors/reactions';
 import { ReadReceiptsCollector } from './collectors/readReceipts';
 import { BackfillCollector } from './collectors/backfill';
 import { patchMessageSerializer } from './util/page';
+import { SessionWatchdog } from './util/watchdog';
 import { CheckpointStore } from './state/checkpoint';
 import { emitGroupSnapshot } from './collectors/groupSnapshot';
 import type { Collector, CollectorContext } from './collectors/Collector';
@@ -100,6 +101,8 @@ async function main(): Promise<void> {
   ];
 
   let shuttingDown = false;
+  let watchdog: SessionWatchdog | null = null;
+  const atividade = new Atividade();
 
   const wire = async (client: Client): Promise<void> => {
     // Antes de qualquer coletor: sem o remendo, `getAllMessagesInChat` morre
@@ -107,7 +110,7 @@ async function main(): Promise<void> {
     // não devolvem nada. Ver `patchMessageSerializer` em util/page.ts.
     await patchMessageSerializer(safePage(client));
 
-    const ctx = buildContext(client, config, sink, checkpoint);
+    const ctx = buildContext(client, config, sink, checkpoint, atividade);
     // Descobre o número da própria conta antes de qualquer coletor, senão as
     // mensagens enviadas por você sairiam sem autor.
     await ctx.roster.loadHostIdentity();
@@ -119,6 +122,16 @@ async function main(): Promise<void> {
       await collector.start(ctx);
     }
     checkpoint.save();
+
+    // O vigia acompanha a página DESTE client; um restart traz outro, e o
+    // anterior morre junto com os listeners dele.
+    watchdog?.stop();
+    watchdog = new SessionWatchdog(createSessionProbe(client), {
+      intervalMs: config.watchdogMs,
+      maxFalhas: config.watchdogMaxFailures,
+    });
+    await watchdog.armar();
+    watchdog.start();
   };
 
   const client = await startSession(config, async (restarted) => {
@@ -128,12 +141,23 @@ async function main(): Promise<void> {
 
   await wire(client);
   metrics.start();
+
+  // Uma linha periódica com o que entrou. Sem isto, silêncio total é
+  // indistinguível de "os grupos estão quietos", e foi assim que uma captura
+  // morta passou três horas despercebida.
+  const batimento = setInterval(() => {
+    log.info('batimento', atividade.drenar());
+  }, config.heartbeatMs);
+  batimento.unref?.();
+
   log.info('monitor ativo — Ctrl+C para encerrar');
 
   const shutdown = async (signal: string): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
     log.info(`recebido ${signal}, encerrando`);
+    watchdog?.stop();
+    clearInterval(batimento);
     for (const collector of collectors) {
       await collector.stop().catch((e) => log.warn(`falha ao parar ${collector.name}`, e));
     }
@@ -156,6 +180,7 @@ function buildContext(
   config: AppConfig,
   sink: Sink,
   checkpoint: CheckpointStore,
+  atividade: Atividade,
 ): CollectorContext {
   const roster = new Roster(client, config.rosterTtlMs);
   const nameCache = new Map<string, string | null>();
@@ -185,21 +210,12 @@ function buildContext(
       nameCache.set(groupId, name);
       return name;
     },
-    emit: (event) => sink.write(event),
+    emit: (event) => {
+      atividade.registrar(event.type);
+      return sink.write(event);
+    },
     newEventId: randomUUID,
   };
-}
-
-/**
- * A página do puppeteer, ou null. `getPage()` lança quando a sessão ainda não
- * terminou de subir, e isso não pode custar o boot.
- */
-function safePage(client: Client): unknown {
-  try {
-    return client.getPage();
-  } catch {
-    return null;
-  }
 }
 
 /** Registra transições de estado da sessão (CONNECTED, DISCONNECTED, ...). */
@@ -228,6 +244,42 @@ async function registerStateListener(ctx: CollectorContext): Promise<void> {
 
     await ctx.emit(event);
   });
+}
+
+/**
+ * Contabiliza o que foi capturado, só para o batimento.
+ *
+ * `session_state` e `group_snapshot` ficam de fora de propósito: os dois
+ * acontecem por conta própria, sem depender de nada chegar do WhatsApp, então
+ * contá-los faria um monitor cego parecer ativo — que é exatamente o engano que
+ * o batimento existe para desfazer.
+ */
+class Atividade {
+  private readonly contagem = new Map<string, number>();
+  private ultimo: number | null = null;
+
+  registrar(tipo: string): void {
+    if (tipo === 'session_state' || tipo === 'group_snapshot') return;
+    this.contagem.set(tipo, (this.contagem.get(tipo) ?? 0) + 1);
+    this.ultimo = Date.now();
+  }
+
+  /** Resumo desde a última chamada; zera os contadores. */
+  drenar(): Record<string, number | string> {
+    let total = 0;
+    const resumo: Record<string, number | string> = {};
+    for (const [tipo, n] of this.contagem) {
+      resumo[tipo] = n;
+      total += n;
+    }
+    this.contagem.clear();
+    resumo.total = total;
+    resumo.ultimoEvento =
+      this.ultimo === null
+        ? 'nunca'
+        : `há ${Math.round((Date.now() - this.ultimo) / 60_000)} min`;
+    return resumo;
+  }
 }
 
 main().catch((error) => {

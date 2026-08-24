@@ -6,10 +6,13 @@
  * servidor Easy API separado.
  */
 
+import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { create, type Client, type ConfigObject } from '@open-wa/wa-automate';
 import type { AppConfig } from './config';
 import { createLogger } from './util/logger';
+import { patchMessageSerializer } from './util/page';
+import type { EstadoPagina, SessionProbe } from './util/watchdog';
 
 const log = createLogger('session');
 
@@ -150,4 +153,102 @@ export async function stopSession(client: Client): Promise<void> {
   } catch (error) {
     log.warn('falha ao encerrar a sessão de forma limpa', error);
   }
+}
+
+// ---------------------------------------------------------------------------
+// sonda para o vigia da sessão
+// ---------------------------------------------------------------------------
+
+/** Nome do selo no `window`. Navegação zera o objeto inteiro e leva o selo junto. */
+const CAMPO_SELO = '__waMonitorSelo';
+
+interface PageLike {
+  evaluate(fn: string): Promise<unknown>;
+}
+
+/**
+ * A página do puppeteer, ou null. `getPage()` lança quando a sessão ainda não
+ * terminou de subir, e isso não pode custar o boot.
+ */
+export function safePage(client: Client): PageLike | null {
+  try {
+    return (client.getPage() as unknown as PageLike) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Liga o vigia (`util/watchdog.ts`) às entranhas do open-wa.
+ *
+ * Uma limitação honesta: `_reRegisterListeners()` faz um `forEach` sem `await`,
+ * então quando ele retorna os registros ainda estão em voo e **não há como
+ * confirmar que a metade do browser voltou a ficar ligada**. O selo prova que a
+ * página é nova e que tentamos religar; quem prova que a captura voltou de fato
+ * é o batimento de `index.ts`, que mostra o silêncio quando ele existe.
+ */
+export function createSessionProbe(client: Client): SessionProbe {
+  return {
+    async carimbar(): Promise<string | null> {
+      const page = safePage(client);
+      if (!page) return null;
+      const selo = randomUUID();
+      try {
+        // O remendo do serializador é reaplicado aqui de propósito: quem
+        // carimba é exatamente quem acabou de constatar que a página é nova, e
+        // o WAPI reinjetado vem sem ele.
+        await patchMessageSerializer(page);
+        await page.evaluate(`window[${JSON.stringify(CAMPO_SELO)}] = ${JSON.stringify(selo)};`);
+        return selo;
+      } catch (error) {
+        log.debug('não foi possível carimbar a página', { error: String(error) });
+        return null;
+      }
+    },
+
+    async conferir(selo: string): Promise<EstadoPagina> {
+      const page = safePage(client);
+      if (!page) return 'morta';
+      try {
+        const estado = await page.evaluate(
+          `(function () {
+             if (!window.WAPI) return 'sem-wapi';
+             return window[${JSON.stringify(CAMPO_SELO)}] === ${JSON.stringify(selo)}
+               ? 'ok' : 'navegou';
+           })()`,
+        );
+        return estado === 'ok' || estado === 'navegou' || estado === 'sem-wapi' ? estado : 'morta';
+      } catch {
+        // A página não respondeu ao evaluate: alvo fechado, browser morto.
+        return 'morta';
+      }
+    },
+
+    async religar(): Promise<void> {
+      const interno = client as unknown as {
+        _refreshing?: boolean;
+        _reRegisterListeners?: () => Promise<void>;
+      };
+      if (typeof interno._reRegisterListeners !== 'function') {
+        throw new Error('_reRegisterListeners não existe nesta versão do open-wa');
+      }
+
+      // Sem esta linha o religamento não faz absolutamente nada. A guarda em
+      // `Client.js:648` é `if (this._listeners[funcName] && !this._refreshing)
+      // return true;` — com `_refreshing` falso, cada listener é considerado
+      // "já registrado" e devolvido como sucesso sem tocar na página.
+      // Restaurar a flag logo em seguida é seguro, e não por sorte:
+      // `_reRegisterListeners` é um `forEach` síncrono, e cada `registerListener`
+      // roda até a guarda ANTES do primeiro `yield` (o `__awaiter` executa o
+      // corpo do gerador de forma síncrona até ali). Quando o `finally` roda,
+      // todas as guardas já passaram com `_refreshing` verdadeiro.
+      const antes = interno._refreshing ?? false;
+      interno._refreshing = true;
+      try {
+        await interno._reRegisterListeners();
+      } finally {
+        interno._refreshing = antes;
+      }
+    },
+  };
 }
