@@ -37,6 +37,7 @@ import type {
   ReactionPayload,
 } from '../types';
 import { createLogger } from '../util/logger';
+import { isSpeech } from '../util/messageTypes';
 import { timeParts } from '../util/time';
 import { resolveIdentity, stableActorKey, type PersonIdentity } from './identity';
 import type { MongoStore } from './client';
@@ -386,6 +387,12 @@ interface FactWrite<T extends Document> {
 function messageFact(event: CapturedEvent, payload: MessagePayload): FactWrite<MessageDoc> | null {
   const groupId = event.group?.id;
   if (!groupId || !payload.messageId) return null;
+
+  // O coletor já descarta aviso de sistema, mas o filtro precisa existir aqui
+  // também: o JSONL histórico tem `gp2` gravado, e sem isto um `mongo:import`
+  // ou um `mongo:migrate` os traria de volta para `messages`. Ver
+  // `util/messageTypes.ts`.
+  if (!isSpeech(payload.messageType)) return null;
 
   const identity = resolveIdentity(event.actor);
   const sentAt = payload.sentAt ? new Date(payload.sentAt) : null;

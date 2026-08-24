@@ -20,7 +20,8 @@
     "probe-polls": "tsx src/scripts/probe-polls.ts",
     "probe-reads": "tsx src/scripts/probe-reads.ts",
     "probe-history": "tsx src/scripts/probe-history.ts",
-    "mongo:fix-members": "tsx src/scripts/mongo-fix-members.ts"
+    "mongo:fix-members": "tsx src/scripts/mongo-fix-members.ts",
+    "mongo:fix-messages": "tsx src/scripts/mongo-fix-messages.ts"
   },
   "engines": {
     "node": ">=20"

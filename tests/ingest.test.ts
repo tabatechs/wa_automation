@@ -125,7 +125,7 @@ class FakeStore {
 
 function message(id: string, opts: Partial<{
   phone: string | null; actorId: string; body: string; quoted: string | null;
-  sentAt: string; media: boolean; mentions: string[];
+  sentAt: string; media: boolean; mentions: string[]; messageType: string;
 }> = {}): CapturedEvent {
   const actorId = opts.actorId ?? '146926720831515@lid';
   return {
@@ -143,7 +143,7 @@ function message(id: string, opts: Partial<{
     payload: {
       messageId: id,
       sentAt: opts.sentAt ?? '2026-08-12T18:00:00.000Z',
-      messageType: 'chat',
+      messageType: opts.messageType ?? 'chat',
       body: opts.body ?? 'olá pessoal',
       caption: null,
       isMedia: opts.media ?? false,
@@ -549,6 +549,34 @@ async function run() {
       'whatsapp',
     );
     ok('pessoa criada pelo monitor nasce com origin whatsapp');
+  }
+
+  // === 13. aviso de sistema não entra em messages, nem reimportado ===
+  {
+    // O coletor já descarta na captura, mas o JSONL histórico tem `gp2`
+    // gravado: sem o filtro aqui, um `mongo:import` ou um `mongo:migrate` os
+    // traria de volta e a conta se estragaria de novo.
+    const store = new FakeStore();
+    const ingestor = new Ingestor(store as never, true);
+    const stats = await ingestor.apply([
+      message('gp2-1', { messageType: 'gp2', body: '' }),
+      message('m1'),
+      message('c1', { messageType: 'ciphertext', body: '' }),
+    ]);
+
+    const ids = [...store.get('messages').docs.keys()];
+    assert.deepStrictEqual(ids, ['m1'], `só a mensagem de verdade entra; veio ${ids}`);
+    assert.strictEqual(stats.messages, 1);
+    assert.strictEqual(stats.skipped, 2);
+    ok('gp2 e ciphertext reimportados do JSONL não voltam para messages');
+
+    assert.strictEqual(
+      store.get('people').counter('5511988812345', 'messagesSent'),
+      1,
+      'entrar num grupo não é falar — era isto que dava messagesSent a quem nunca escreveu',
+    );
+    assert.strictEqual(store.get('groups').counter(GROUP, 'totalMessages'), 1);
+    ok('nenhum contador é tocado pelo que não é fala');
   }
 
   console.log('\ningest\n' + results.join('\n') + `\n\n${results.length} verificações OK\n`);

@@ -27,6 +27,7 @@
 import type { Client, Message } from '@open-wa/wa-automate';
 import { EVENT_SCHEMA_VERSION } from '../types';
 import type { CapturedEvent, MessagePayload, ParticipantsChangedPayload } from '../types';
+import { isSpeech } from '../util/messageTypes';
 import { waTimestampToIso } from '../util/phone';
 import { createLogger } from '../util/logger';
 import { localIso } from '../util/time';
@@ -98,9 +99,19 @@ export class BackfillCollector implements Collector {
 
     let emitted = 0;
     let skipped = 0;
+    let ignorados = 0;
     for (const message of ordered) {
       const at = messageTime(message);
       if (at < since) continue;
+
+      // Antes da janela: aviso de sistema não recebe reação nem confirmação de
+      // leitura, então vigiá-lo seria consulta gasta a cada varredura. E ele
+      // também não avança o checkpoint — não é mensagem. Ver
+      // `util/messageTypes.ts`.
+      if (!isSpeech(message?.type)) {
+        ignorados += 1;
+        continue;
+      }
 
       const messageId = String(message?.id ?? '');
 
@@ -120,7 +131,12 @@ export class BackfillCollector implements Collector {
       emitted += 1;
     }
 
-    log.info('backfill concluído', { groupId, emitidas: emitted, jaConhecidas: skipped });
+    log.info('backfill concluído', {
+      groupId,
+      emitidas: emitted,
+      jaConhecidas: skipped,
+      semFala: ignorados,
+    });
   }
 
   /**

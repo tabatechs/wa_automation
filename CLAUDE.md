@@ -52,6 +52,9 @@ coletores  →  ctx.emit()  →  Sink  →  JSONL (durável)
   WhatsApp navegou (e portanto que os listeners morreram) e os religa; ver a
   armadilha correspondente. A sonda que conhece as entranhas do open-wa é
   `createSessionProbe()`, em `src/session.ts`.
+- `src/util/messageTypes.ts` — o que conta como fala. Filtra os avisos de
+  sistema que o `onAnyMessage` entrega junto com as mensagens; ver a armadilha
+  do `gp2`.
 - `src/util/time.ts` — o fuso do projeto. `localIso()` carimba todo evento e
   todo log em São Paulo (`…-03:00`); `timeParts()`/`dateKey()` fazem os buckets
   diários e por hora. Não use `toISOString()` em nada que seja gravado ou lido
@@ -77,6 +80,7 @@ npm run mongo:build    # recalcula métricas; --full reconta tudo do zero
 npm run mongo:migrate  # move grupos de um sufixo de coleção para outro
 npm run mongo:size     # uso do cluster vs. os 512 MB do plano gratuito
 npm run mongo:fix-members # remove member_events sem pessoa; --apply executa
+npm run mongo:fix-messages # tira de messages o que não é fala; --apply executa
 npm run probe-polls    # verifica se enquetes são capturáveis nesta sessão
 npm run probe-reads    # verifica se dá para saber quem leu as mensagens próprias
 ```
@@ -207,6 +211,41 @@ mesma postura: **o tipo declarado não é evidência**. Os fantasmas já gravado
 saem com `npm run mongo:fix-members` — que também desfaz a inflação em
 `groups.joins`/`leaves`, porque `countMemberEvent` soma `Math.max(who.length, 1)`
 e o `mongo:build --full` não recalcula esses dois contadores.
+
+**Nem tudo que chega por `onAnyMessage` é mensagem.** O WhatsApp materializa
+os avisos de sistema como objeto de mensagem no chat, e o listener entrega todos
+eles. O maior é o `gp2` ("group v2 notification"): o balão cinza de "Fulano
+adicionou Beltrano", "Fulano saiu", "Fulano mudou a descrição". O que distingue
+um `gp2` de outro é o `subtype`, e é dele que sai o nosso `participants_changed`
+— o `onGlobalParicipantsChanged` filtra `previewMessage.type === 'gp2'` e traduz
+`subtype` (`invite`, `add`, `remove`, `leave`, `promote`, `demote`) em `action`
+(`wapi.js:1322`). Ou seja: **o `gp2` é a mesma entrada e saída que já vira
+`member_events`**, vista pelo outro lado.
+
+Não havia filtro nenhum, nem na captura nem no `Ingestor`, nem no recálculo (que
+faz `$sum: 1` sobre `messages` inteiro). Cada entrada de participante virava
+`messagesSent += 1` para alguém. Em 24/08/2026, em produção: 61 dos 500
+documentos de `messages` eram `gp2` (12%), e **37 das 119 pessoas com "mensagem"
+nunca tinham escrito uma linha** — marcadas como `occasional` ou `observer`
+quando são `lurker`. Do outro lado inflava os admins, que ganhavam uma mensagem
+por pessoa convidada. Isso atinge o projeto no ponto: separar quem participa de
+quem só está no grupo é a única coisa que ele faz.
+
+`src/util/messageTypes.ts` guarda a lista e o critério. A prova de que não é
+fala está no dado: **nenhum** dos 61 `gp2` tinha `body` ou `caption` — o texto
+que aparece na tela é montado pelo cliente a partir do `subtype`, nunca trafega
+como corpo. `ciphertext` e `revoked` entram no mesmo corte por decisão de
+definição: a mensagem existiu, mas o conteúdo não é legível para nós. Ficam de
+fora do corte `groups_v4_invite`, `poll_creation` e `unknown` — o último é o
+nosso próprio fallback para `type` ausente. **Na dúvida conta como fala.**
+
+O filtro mora em dois lugares de propósito. Nos coletores, para não gravar
+mais; e em `messageFact`, porque **o JSONL histórico já tem `gp2` dentro** — sem
+a defesa no `Ingestor`, um `mongo:import` ou um `mongo:migrate` traria tudo de
+volta. O que já está no banco sai com `npm run mongo:fix-messages`, seguido de
+`mongo:build --full`; o script existe basicamente por causa de
+`lastMessageAt`, que é `$max` do caminho quente e o `--full` não recalcula —
+sem ele a pessoa fica marcada como tendo "falado" no dia em que só entrou.
 
 **Votos de enquete não existem para um aparelho conectado.** Verificado com
 sessão real: `__x_pollVotesSnapshot` é `{pollVotes: []}` e `Store.PollVote` fica

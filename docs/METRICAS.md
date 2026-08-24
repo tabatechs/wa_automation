@@ -112,7 +112,7 @@ decide `active` é evento de entrada/saída ou o snapshot do grupo.
 
 | campo | o que é | como é calculado | por que importa |
 |---|---|---|---|
-| `messagesSent` | mensagens enviadas | quente: `+1` por mensagem. `--full` reconta de `messages` | a métrica bruta de participação |
+| `messagesSent` | mensagens enviadas | quente: `+1` por mensagem. `--full` reconta de `messages`. **Só conta fala** — ver §4.1 | a métrica bruta de participação |
 | `mediaSent` | mensagens com mídia | `isMedia` | quem manda foto/vídeo costuma estar em campo |
 | `charsSent` | caracteres somados | `body` ou `caption` | separa quem argumenta de quem manda "👍" |
 | `avgMessageLength` | média de caracteres | frio, `$avg` do `len` das mensagens | idem, já normalizado |
@@ -356,6 +356,34 @@ não há como repontá-lo).
 > mensagem que ela reage. Somar na hora perderia o crédito. Tudo que a pessoa
 > *recebeu* é calculado no caminho frio, a partir da fonte.
 
+### 4.1 O que **não** entra em `messages`
+
+`messagesSent` e `totalMessages` contam **fala**, não notificação. O
+`onAnyMessage` entrega também os avisos de sistema que o WhatsApp materializa
+como objeto de mensagem no chat, e eles são descartados na captura e no
+`Ingestor` — a lista e o critério estão em `src/util/messageTypes.ts`.
+
+| tipo | o que é | por que fica fora |
+|---|---|---|
+| `gp2` | o balão cinza de "Fulano adicionou Beltrano", "Fulano saiu", "Fulano mudou a descrição" | é a **mesma** entrada/saída já registrada em `member_events`, vista pelo lado do chat. Ninguém escreveu nada |
+| `notification`, `notification_template`, `e2e_notification`, `broadcast_notification`, `group_notification`, `protocol`, `call_log`, `group-history`, `message_history_notice` | a mesma família | aviso do sistema, nunca tem corpo |
+| `ciphertext` | mensagem que não foi decifrada | existiu, mas não temos o conteúdo |
+| `revoked` | mensagem apagada por quem escreveu | idem |
+
+Continuam contando: `groups_v4_invite` (é um cartão que alguém enviou de
+propósito), `poll_creation` (criar enquete é participar) e `unknown` — este
+último é o nosso próprio fallback para `type` ausente, e pode ser mensagem de
+verdade. **Na dúvida conta como fala:** perder participação é pior que contar
+ruído.
+
+> **Por que isso é uma métrica e não uma faxina.** Sem o filtro, entrar num
+> grupo dava `messagesSent += 1`. Em 24/08/2026, em produção, 61 dos 500
+> documentos de `messages` eram `gp2` (12%) e **37 das 119 pessoas com
+> "mensagem" nunca tinham escrito uma linha** — apareciam como `occasional` ou
+> `observer` quando são `lurker`. Do outro lado, inflava os admins: quem
+> adiciona gente ganhava uma mensagem por convite. O conserto do que já estava
+> gravado é `npm run mongo:fix-messages`, seguido de `mongo:build --full`.
+
 ## 5. `reactions`
 
 `_id = ${targetMessageId}|${ator}|${emoji}`. A chave usa o **id normalizado do
@@ -476,6 +504,19 @@ A ordem interna da passada não é arbitrária:
 5. **derivados de `people`** → 6. **derivados de `groups`** → 7. **score e tier**
 
 O score é o último porque depende de tudo que veio antes.
+
+### O que `--full` **não** conserta
+
+Nem todo campo é derivado de um fato. Estes só existem como acumulador do
+caminho quente, e nenhuma passada os recalcula:
+
+| campo | quem conserta |
+|---|---|
+| `groups.joins`, `groups.leaves` | `npm run mongo:fix-members` |
+| `people.lastMessageAt`, `groups.lastMessageAt` (`$max` do caminho quente) | `npm run mongo:fix-messages` |
+
+É por isso que os dois scripts de conserto existem: apagar o documento errado
+não basta se o contador que ele somou não for desfeito à mão.
 
 ---
 

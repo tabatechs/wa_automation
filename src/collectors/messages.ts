@@ -8,6 +8,7 @@
 import type { Message } from '@open-wa/wa-automate';
 import { EVENT_SCHEMA_VERSION } from '../types';
 import type { CapturedEvent, MessagePayload } from '../types';
+import { isSpeech } from '../util/messageTypes';
 import { waTimestampToIso } from '../util/phone';
 import { createLogger } from '../util/logger';
 import { localIso } from '../util/time';
@@ -39,6 +40,16 @@ export class MessagesCollector implements Collector {
     // em memória e nunca chega ao disco.
     if (!ctx.isMonitored(groupId)) return;
 
+    const messageType = String(message.type ?? 'unknown');
+
+    // Aviso de sistema não é mensagem. `gp2` é a entrada/saída de participante
+    // vista pelo lado do chat — a mesma que já vira `member_events` — e contá-la
+    // dava `messagesSent` a quem nunca escreveu. Ver `util/messageTypes.ts`.
+    if (!isSpeech(messageType)) {
+      log.debug('tipo sem fala, ignorado', { messageType, groupId });
+      return;
+    }
+
     // Se a mensagem é da própria conta, a identidade do host é autoritativa —
     // melhor do que tentar traduzir o LID do dispositivo que enviou.
     const authorId = resolveAuthorId(message);
@@ -64,7 +75,7 @@ export class MessagesCollector implements Collector {
     const payload: MessagePayload = {
       messageId,
       sentAt,
-      messageType: String(message.type ?? 'unknown'),
+      messageType,
       body: nonEmpty(message.body),
       caption: nonEmpty(message.caption),
       isMedia: Boolean(message.isMedia || message.isMMS),
