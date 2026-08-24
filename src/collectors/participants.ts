@@ -48,17 +48,25 @@ export class ParticipantsCollector implements Collector {
     ctx: CollectorContext,
     event: ParticipantChangedEventModel,
   ): Promise<void> {
-    const groupId = event.chat ? String(event.chat) : null;
+    const groupId = extractId(event.chat);
     if (!ctx.isMonitored(groupId)) return;
 
     // A lista de membros mudou; o cache precisa cair antes de resolver os nomes.
-    ctx.roster.invalidateGroup(groupId!);
+    ctx.roster.invalidateGroup(groupId);
 
     const rawAction = String(event.action ?? 'unknown');
-    const who = await ctx.roster.resolveMany(
-      Array.isArray(event.who) ? event.who.map(String) : [],
-    );
-    const by = await ctx.roster.resolve(event.by ? String(event.by) : null);
+    const ids = participantIds(event.who);
+    if (ids.length === 0) {
+      // Sem este aviso a falha é muda: o evento vira um registro sem pessoa e
+      // só aparece muito depois, como uma coluna de `personId: null` no Mongo.
+      log.warn('mudança de participantes sem id de pessoa', {
+        groupId,
+        rawAction,
+        whoTipo: Array.isArray(event.who) ? 'array' : typeof event.who,
+      });
+    }
+    const who = await ctx.roster.resolveMany(ids);
+    const by = await ctx.roster.resolve(extractId(event.by));
 
     const payload: ParticipantsChangedPayload = {
       action: KNOWN_ACTIONS[rawAction.toLowerCase()] ?? 'unknown',
@@ -72,16 +80,62 @@ export class ParticipantsCollector implements Collector {
       eventId: ctx.newEventId(),
       type: 'participants_changed',
       capturedAt: localIso(),
-      group: { id: groupId!, name: await ctx.groupName(groupId!) },
+      group: { id: groupId, name: await ctx.groupName(groupId) },
       actor: by,
       payload,
     };
 
     await ctx.emit(captured);
-    await emitGroupSnapshot(ctx, groupId!, 'participants_changed');
+    await emitGroupSnapshot(ctx, groupId, 'participants_changed');
   }
 
   async stop(): Promise<void> {
     // Listener vive no browser; nada a desfazer.
   }
+}
+
+/**
+ * Extrai o id de um participante, aceitando as formas que o WA Web entrega.
+ *
+ * O WAPI embutido manda o id como **string** já serializada; o patch remoto e
+ * as versões mais novas mandam o Wid cru (`{_serialized}`) ou um participante
+ * (`{id: {_serialized}}`). Reduzir tudo a uma string aqui evita que a diferença
+ * vaze para o resto do coletor.
+ */
+export function extractId(valor: unknown): string | null {
+  if (typeof valor === 'string') return valor.trim() || null;
+  if (!valor || typeof valor !== 'object') return null;
+
+  const obj = valor as { _serialized?: unknown; id?: unknown };
+  if (typeof obj._serialized === 'string') return obj._serialized.trim() || null;
+  if (typeof obj.id === 'string') return obj.id.trim() || null;
+  if (obj.id && typeof obj.id === 'object') {
+    const aninhado = (obj.id as { _serialized?: unknown })._serialized;
+    if (typeof aninhado === 'string') return aninhado.trim() || null;
+  }
+  return null;
+}
+
+/**
+ * Normaliza o campo `who` do evento de participantes.
+ *
+ * **Armadilha que custou 100% das entradas e saídas ao vivo.** O tipo
+ * `ParticipantChangedEventModel` da própria lib declara `who: string[]`, mas o
+ * `WAPI.onGlobalParicipantsChanged` embutido (`dist/lib/wapi.js:1238`) chama o
+ * callback com uma **string**:
+ *
+ *     callback({ by: undefined, action, who: eventData.id._serialized, chat })
+ *
+ * Ler só array fazia `Array.isArray` dar false, a lista virava `[]`, e o evento
+ * era gravado sem pessoa nenhuma. O tipo mente; a única defesa é aceitar as
+ * duas formas.
+ */
+export function participantIds(who: unknown): string[] {
+  const itens = Array.isArray(who) ? who : who == null ? [] : [who];
+  const ids: string[] = [];
+  for (const item of itens) {
+    const id = extractId(item);
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
 }

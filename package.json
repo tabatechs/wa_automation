@@ -19,7 +19,8 @@
     "mongo:size": "tsx src/scripts/mongo-size.ts",
     "probe-polls": "tsx src/scripts/probe-polls.ts",
     "probe-reads": "tsx src/scripts/probe-reads.ts",
-    "probe-history": "tsx src/scripts/probe-history.ts"
+    "probe-history": "tsx src/scripts/probe-history.ts",
+    "mongo:fix-members": "tsx src/scripts/mongo-fix-members.ts"
   },
   "engines": {
     "node": ">=20"
