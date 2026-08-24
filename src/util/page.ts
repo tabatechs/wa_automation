@@ -30,9 +30,6 @@ import { createLogger } from './logger';
 
 const log = createLogger('page');
 
-/** Páginas já preparadas, para não reinstalar o shim a cada chamada. */
-const prontas = new WeakSet<object>();
-
 interface PageLike {
   evaluate(fn: string): Promise<unknown>;
 }
@@ -41,16 +38,29 @@ interface PageLike {
  * Instala o shim de `__name`. Idempotente e seguro de chamar sempre.
  * Devolve false se a página não aceitou — aí `evaluate` com função vai falhar
  * e o chamador deve ter um caminho alternativo.
+ *
+ * ## Por que não memorizar quais páginas já foram preparadas
+ *
+ * Havia aqui um `WeakSet` de páginas prontas, e ele estava errado. O objeto
+ * `Page` do puppeteer **sobrevive** a uma navegação — o que troca é o `window`
+ * dentro dele. Depois de navegar, o cache respondia "já preparei" enquanto o
+ * `globalThis.__name` tinha ido embora com o documento antigo, e todo
+ * `page.evaluate` com função voltava a morrer em `ReferenceError: __name is not
+ * defined`, engolido pelos `try/catch` de quem chama. Na prática isso
+ * ressuscitava, a cada navegação, o bug que manteve a ponte LID→telefone
+ * quebrada por meses — pessoas que só apareceram por `@lid` depois disso nunca
+ * ganhavam telefone e viravam documento separado em `people`.
+ *
+ * O custo de acertar é uma ida ao browser por chamada, com uma atribuição
+ * trivial. É barato demais para valer um cache que pode mentir.
  */
 export async function preparePage(page: unknown): Promise<boolean> {
   if (!page || typeof page !== 'object') return false;
-  if (prontas.has(page)) return true;
 
   try {
     await (page as PageLike).evaluate(
       'globalThis.__name = globalThis.__name || function (fn) { return fn; };',
     );
-    prontas.add(page);
     return true;
   } catch (error) {
     log.debug('não foi possível preparar a página', { error: String(error) });

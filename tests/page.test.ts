@@ -42,14 +42,26 @@ async function run() {
     ok('instala o shim de __name passando código como string');
   }
 
-  // --- idempotente ---
+  // --- reinstala sempre, de propósito ---
   {
+    // Havia aqui um cache de páginas já preparadas, e ele mentia. O objeto
+    // `Page` do puppeteer SOBREVIVE a uma navegação — o que troca é o `window`
+    // dentro dele. Depois de navegar, o cache respondia "já preparei" enquanto
+    // o `__name` tinha ido embora com o documento antigo, e todo `evaluate` com
+    // função voltava a morrer em `ReferenceError`, engolido pelo try/catch de
+    // quem chama. Era o bug que manteve a ponte LID→telefone quebrada por meses,
+    // ressuscitado a cada reconexão.
     const { page, calls } = fakePage();
     await preparePage(page);
     await preparePage(page);
     await preparePage(page);
-    assert.strictEqual(calls.length, 1, 'a mesma página não é preparada de novo');
-    ok('preparar a mesma página várias vezes custa um evaluate só');
+    assert.strictEqual(
+      calls.length,
+      3,
+      'o shim tem de ser reinstalado a cada chamada: navegação zera o window ' +
+        'sem trocar o objeto Page',
+    );
+    ok('preparar a mesma página de novo REINSTALA o shim (navegação zera o window)');
   }
 
   // --- páginas diferentes são preparadas cada uma ---
