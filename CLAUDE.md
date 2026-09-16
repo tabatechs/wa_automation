@@ -363,6 +363,13 @@ planilha e estraga qualquer contagem de silenciosos.** O caminho quente grava
 `origin: 'whatsapp'` em `$set` (não `$setOnInsert`): quando a pessoa aparece de
 verdade, o mesmo documento é adotado e os campos da planilha sobrevivem.
 
+**As coleções `app_crm_*` são do `tabatech_monitor`, não deste repositório.** Um
+script de lá espelha os contatos do CRM (LionChat) em `app_crm_contatos`,
+`app_crm_atributos`, `app_crm_mudancas` e `app_crm_sync`, no mesmo banco, sem
+sufixo de ambiente. Ele nunca escreve em `people` nem em `groups` — o painel
+junta na leitura. Não toque nessas coleções daqui, e lembre delas ao ler
+`npm run mongo:size`: o espelho ocupa ~40–50 MB com ~80 mil contatos.
+
 **A fusão de identidade só soma o que está em `newPersonCounters()`.** O laço de
 `drainPerson` tinha uma allowlist implícita perigosa — "todo campo numérico" —
 que somaria colunas numéricas de planilha em vez de preservá-las. Contador novo
