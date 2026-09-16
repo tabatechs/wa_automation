@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import type { Client } from '@open-wa/wa-automate';
 import { loadConfig, type AppConfig } from './config';
 import { createSessionProbe, safePage, startSession, stopSession } from './session';
+import { GroupDirectory } from './enrich/groupDirectory';
 import { Roster } from './enrich/roster';
 import { JsonlSink } from './sink/JsonlSink';
 import { MongoSink } from './sink/MongoSink';
@@ -182,7 +183,11 @@ function buildContext(
   checkpoint: CheckpointStore,
   atividade: Atividade,
 ): CollectorContext {
-  const roster = new Roster(client, config.rosterTtlMs);
+  const roster = new Roster(
+    client,
+    config.rosterTtlMs,
+    new GroupDirectory(client, config.rosterTtlMs),
+  );
   const nameCache = new Map<string, string | null>();
 
   return {
@@ -202,11 +207,12 @@ function buildContext(
         )) as { name?: string; formattedTitle?: string } | undefined;
         name = chat?.name ?? chat?.formattedTitle ?? null;
       } catch {
-        // Sem nome: a whitelist guarda só ids, e inventar um apelido local
-        // criaria um segundo nome para o mesmo grupo. O recálculo preenche o
-        // nome a partir do group_snapshot, que vem do WhatsApp.
-        name = null;
+        // Fora de `Store.Chat` o getChatById não acha nada; o servidor abaixo sabe.
       }
+      // Sem nome continua null: a whitelist guarda só ids, e inventar um
+      // apelido local criaria um segundo nome para o mesmo grupo. O recálculo
+      // preenche o nome a partir do group_snapshot, que vem do WhatsApp.
+      name ??= (await roster.groupMeta(groupId))?.subject ?? null;
       nameCache.set(groupId, name);
       return name;
     },

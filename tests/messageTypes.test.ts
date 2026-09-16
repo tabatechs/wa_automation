@@ -54,6 +54,7 @@ function harness(stateDir: string, store: unknown[] = []) {
       resolveSelf: async () => null,
       resolveMany: async () => [],
       groupMembers: async () => [],
+      groupMeta: async () => null,
     },
     checkpoint: new CheckpointStore(stateDir),
     isMonitored: (id: unknown): id is string => id === G,

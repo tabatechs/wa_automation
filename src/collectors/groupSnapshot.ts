@@ -20,33 +20,13 @@ export async function emitGroupSnapshot(
   // responder com lista vazia nos primeiros segundos após a sessão ficar pronta.
   const participants = await ctx.roster.groupMembers(groupId, reason === 'boot');
 
-  let subject: string | null = null;
-  let description: string | null = null;
-  let owner: string | null = null;
-
-  try {
-    const info = (await ctx.client.getGroupInfo(
-      groupId as Parameters<typeof ctx.client.getGroupInfo>[0],
-    )) as
-      | {
-          subject?: string;
-          desc?: string;
-          owner?: string | { _serialized?: string };
-        }
-      | undefined;
-
-    subject = typeof info?.subject === 'string' ? info.subject : null;
-    description = typeof info?.desc === 'string' ? info.desc : null;
-    owner =
-      typeof info?.owner === 'string'
-        ? info.owner
-        : (info?.owner?._serialized ?? null);
-  } catch (error) {
-    log.warn('getGroupInfo falhou; snapshot sai só com os participantes', {
-      groupId,
-      error: String(error),
-    });
-  }
+  // O servidor responde por todos os grupos; `getGroupInfo` só pelos que
+  // estão em memória, e mesmo neles costuma devolver nulos.
+  const meta = await ctx.roster.groupMeta(groupId);
+  const local = meta?.subject || meta?.inStore === false ? null : await readGroupInfo(ctx, groupId);
+  const subject = meta?.subject ?? local?.subject ?? null;
+  const description = meta?.description ?? local?.description ?? null;
+  const owner = meta?.owner ?? local?.owner ?? null;
 
   const payload: GroupSnapshotPayload = {
     subject,
@@ -68,4 +48,34 @@ export async function emitGroupSnapshot(
   };
 
   await ctx.emit(event);
+}
+
+async function readGroupInfo(
+  ctx: CollectorContext,
+  groupId: string,
+): Promise<{ subject: string | null; description: string | null; owner: string | null } | null> {
+  try {
+    const info = (await ctx.client.getGroupInfo(
+      groupId as Parameters<typeof ctx.client.getGroupInfo>[0],
+    )) as
+      | {
+          subject?: string;
+          desc?: string;
+          owner?: string | { _serialized?: string };
+        }
+      | undefined;
+
+    return {
+      subject: typeof info?.subject === 'string' ? info.subject : null,
+      description: typeof info?.desc === 'string' ? info.desc : null,
+      owner:
+        typeof info?.owner === 'string' ? info.owner : (info?.owner?._serialized ?? null),
+    };
+  } catch (error) {
+    log.warn('getGroupInfo falhou; snapshot sai só com os participantes', {
+      groupId,
+      error: String(error),
+    });
+    return null;
+  }
 }

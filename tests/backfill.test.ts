@@ -67,6 +67,7 @@ function makeHarness(stateDir: string, store: unknown[], opts: { maxMessages?: n
       resolveSelf: async () => null,
       resolveMany: async () => [],
       groupMembers: async () => [],
+      groupMeta: async () => null,
     },
     checkpoint: new CheckpointStore(stateDir),
     isMonitored: (id: unknown): id is string => id === G,

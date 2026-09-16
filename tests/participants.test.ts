@@ -52,6 +52,7 @@ function makeCtx(emitidos: Emitido[]) {
         ids.map((id) => ({ id, phone: id.split('@')[0] ?? null, name: null, nameSource: null })),
       invalidateGroup: () => {},
       groupMembers: async () => [],
+      groupMeta: async () => null,
     },
     sink: { write: async () => {} },
     checkpoint: {} as never,

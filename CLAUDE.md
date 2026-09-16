@@ -44,7 +44,8 @@ coletores  →  ctx.emit()  →  Sink  →  JSONL (durável)
 - `src/mongo/` — `ingest.ts` é o caminho quente (contadores a cada evento),
   `metrics.ts` é o recálculo caro, `identity.ts` decide o `_id` de uma pessoa,
   `scoring.ts` concentra pesos e cortes do score.
-- `src/enrich/` — `roster.ts` resolve nome e telefone; `lid.ts` faz a ponte
+- `src/enrich/` — `roster.ts` resolve nome e telefone; `groupDirectory.ts`
+  traz do servidor os grupos que o WA Web não tem em memória; `lid.ts` faz a ponte
   LID→`@c.us`; `messageInfo.ts` lê os "dados da mensagem" (quem leu) pelo store.
 - `src/state/checkpoint.ts` — dedupe de mensagens e ponto de retomada entre
   execuções.
@@ -83,6 +84,7 @@ npm run mongo:fix-members # remove member_events sem pessoa; --apply executa
 npm run mongo:fix-messages # tira de messages o que não é fala; --apply executa
 npm run probe-polls    # verifica se enquetes são capturáveis nesta sessão
 npm run probe-reads    # verifica se dá para saber quem leu as mensagens próprias
+npm run probe-groups   # compara os grupos em memória com os que o servidor devolve
 ```
 
 `tsx` é o caminho de execução. **`dist/` está defasado** — `npm start` roda
@@ -269,6 +271,31 @@ do projeto — por isso `message_read` fica fora do log bruto, junto com
 `group_snapshot`. Varrer mais rápido não gera mais eventos (é um por pessoa por
 mensagem, uma vez só) nem melhora o horário, que vem do WhatsApp; só gasta
 consulta.
+
+**O WA Web do aparelho vinculado só conhece uma fração dos grupos.**
+`getAllGroups`, `getGroupMembers`, `getGroupInfo`, `getChatById` e
+`getAllMessagesInChat` leem `Store.Chat`, que em 16/09/2026 tinha 17 dos 179
+grupos da conta. Para os outros, o WAPI imprime `group members ids is not an
+array ERROR: Group chat does not exist in this session`. Esperar não muda nada,
+e `client.refresh()` só reabre a aba sobre o mesmo IndexedDB. Com 149 grupos
+nessa situação, o boot passava ~15 s de backoff em cada um, em série, antes de
+ligar qualquer coletor — uns 40 min sem captura — e ainda gravava todos os
+snapshots sem participante.
+
+A lista completa vem do servidor, por
+`require('WAWebGroupQueryJob').queryAllGroups()`, numa ida só.
+`src/enrich/groupDirectory.ts` guarda o resultado (TTL de `ROSTER_TTL_MS`,
+derrubado a cada mudança de participantes) e marca `inStore` por grupo. O
+`Roster` usa o store para quem está em memória — é de lá que vem o nome — e o
+servidor para o resto, sem a espera. Assunto e nome do grupo seguem a mesma
+regra, e o backfill pula quem está fora. O servidor entrega todo participante com
+`id` em `@lid` e o telefone em `phoneNumber`. **O id gravado é o `@c.us`
+sempre que existe**: a reconciliação compara `@c.us`, e uma lista em `@lid`
+viraria êxodo em massa no dia em que o grupo entrasse no store. Quem vem sem
+telefone (308 de 5414, todos com `username` — número escondido) entra pelo
+`@lid`, que para essa pessoa é a identidade estável. Se o
+módulo mudar de nome, o ponto de partida é `npm run probe-groups`, que também
+mostra a forma dos participantes.
 
 **`getAllMessagesInChat` devolve só o que está na memória do WA Web.** Num grupo
 com centenas de mensagens ela costuma devolver uma dúzia — é a janela que o WA

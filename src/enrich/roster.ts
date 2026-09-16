@@ -13,6 +13,7 @@ import type { Client, Contact } from '@open-wa/wa-automate';
 import type { Actor, NameSource, ParticipantSnapshot } from '../types';
 import { chatIdToE164 } from '../util/phone';
 import { createLogger } from '../util/logger';
+import type { DirectoryGroup, GroupSource } from './groupDirectory';
 import { LidResolver, isLid, normalizeLid } from './lid';
 
 const log = createLogger('roster');
@@ -70,6 +71,8 @@ export class Roster {
   constructor(
     private client: Client,
     private readonly ttlMs: number,
+    /** Metadados vindos do servidor, para os grupos fora de `Store.Chat`. */
+    private readonly directory: (GroupSource & { setClient?: (c: Client) => void }) | null = null,
   ) {
     this.lids = new LidResolver(client);
   }
@@ -78,6 +81,18 @@ export class Roster {
   setClient(client: Client): void {
     this.client = client;
     this.lids.setClient(client);
+    this.directory?.setClient?.(client);
+  }
+
+  /** Assunto, dono e participantes segundo o servidor; null sem diretório. */
+  async groupMeta(groupId: string): Promise<DirectoryGroup | null> {
+    if (!this.directory) return null;
+    try {
+      return await this.directory.get(groupId);
+    } catch (error) {
+      log.debug('diretório de grupos falhou', { groupId, error: String(error) });
+      return null;
+    }
   }
 
   /**
@@ -165,14 +180,23 @@ export class Roster {
    * metadados de um grupo grande ainda podem não ter sincronizado, e a chamada
    * devolve lista vazia — foi o que produziu um group_snapshot com 0
    * participantes num grupo de 830. Nesse caso vale a pena insistir.
+   *
+   * Grupo fora de `Store.Chat` nem passa pelo `getGroupMembers` — lá ele só
+   * responde "Group chat does not exist" — e vai direto ao servidor. Esperar
+   * também não adianta para ele: o que falta não é sincronização, é o chat.
    */
   async groupMembers(groupId: string, waitForMembers = false): Promise<ParticipantSnapshot[]> {
     const cached = this.members.get(groupId);
     if (cached && cached.expiresAt > Date.now() && cached.value.length > 0) return cached.value;
 
-    let snapshot = await this.fetchMembers(groupId);
+    const meta = await this.groupMeta(groupId);
+    let snapshot = meta?.inStore === false ? [] : await this.fetchMembers(groupId);
 
-    if (snapshot.length === 0 && waitForMembers) {
+    if (snapshot.length === 0 && meta) {
+      snapshot = this.fromDirectory(meta);
+    }
+
+    if (snapshot.length === 0 && waitForMembers && !meta) {
       const delaysMs = [500, 1000, 2000, 4000, 8000];
       for (const delay of delaysMs) {
         await sleep(delay);
@@ -206,6 +230,29 @@ export class Roster {
     this.members.set(groupId, { value: snapshot, expiresAt: Date.now() + this.ttlMs });
     this.lastGoodMembers.set(groupId, snapshot);
     return snapshot;
+  }
+
+  private fromDirectory(meta: DirectoryGroup): ParticipantSnapshot[] {
+    if (!meta.participants) {
+      log.warn('servidor devolveu participante sem id; lista descartada', {
+        groupId: meta.id,
+      });
+      return [];
+    }
+    // Só quem tem telefone ensina vínculo: `learnFromContacts` exige `@c.us`.
+    this.lids.learnFromContacts(meta.participants);
+    // Sem nome: buscar contato a contato para ~160 grupos no boot custaria o
+    // que esta rota existe para evitar. O nome chega pelo `resolve()` quando a
+    // pessoa aparecer, e o cache de contatos não é tocado para não travá-lo
+    // num ator sem nome até o TTL vencer.
+    return meta.participants.map((p) => ({
+      id: p.id,
+      phone: chatIdToE164(p.id),
+      name: this.contacts.get(p.id)?.value.name ?? null,
+      nameSource: this.contacts.get(p.id)?.value.nameSource ?? null,
+      isAdmin: p.isAdmin,
+      isSuperAdmin: p.isSuperAdmin,
+    }));
   }
 
   private async fetchMembers(groupId: string): Promise<ParticipantSnapshot[]> {
@@ -271,6 +318,7 @@ export class Roster {
   /** Invalida o cache de um grupo — chamado quando os participantes mudam. */
   invalidateGroup(groupId: string): void {
     this.members.delete(groupId);
+    this.directory?.invalidate();
   }
 }
 

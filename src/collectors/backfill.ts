@@ -77,6 +77,14 @@ export class BackfillCollector implements Collector {
       jaRegistradas: checkpoint.emittedMessageIds.length,
     });
 
+    // Fora de `Store.Chat` não há mensagem em memória para ler, e a chamada só
+    // produziria erro — inclusive o `reading 'msgs'` que o CLAUDE.md usa como
+    // assinatura de navegação de página.
+    if ((await ctx.roster.groupMeta(groupId))?.inStore === false) {
+      log.info('grupo fora da memória do WA Web; sem backfill', { groupId });
+      return;
+    }
+
     const messages = await this.readStore(ctx, groupId, checkpoint.lastMessageAt);
     if (messages.length === 0) {
       log.info('nada a recuperar', { groupId });

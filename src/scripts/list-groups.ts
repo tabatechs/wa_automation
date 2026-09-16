@@ -15,7 +15,9 @@
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
+import type { Client } from '@open-wa/wa-automate';
 import { loadConfig } from '../config';
+import { GroupDirectory } from '../enrich/groupDirectory';
 import { startSession, stopSession } from '../session';
 import { createLogger, setLogLevel } from '../util/logger';
 import { localIso } from '../util/time';
@@ -40,25 +42,14 @@ async function main(): Promise<void> {
 
   const client = await startSession(config);
   try {
-    const groups = await client.getAllGroups();
-    if (!groups || groups.length === 0) {
+    const brutos = (await consultarServidor(client)) ?? (await lerMemoria(client));
+    if (brutos.length === 0) {
       log.warn('nenhum grupo encontrado nesta conta');
       return;
     }
 
-    const rows: GroupRow[] = groups
-      .map((group) => {
-        const id = String((group as { id?: unknown }).id ?? '');
-        return {
-          id,
-          name:
-            (group as { name?: string }).name ??
-            (group as { formattedTitle?: string }).formattedTitle ??
-            '(sem nome)',
-          participantes: contarParticipantes(group),
-          monitorado: config.groupIds.has(id),
-        };
-      })
+    const rows: GroupRow[] = brutos
+      .map((g) => ({ ...g, monitorado: config.groupIds.has(g.id) }))
       .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
 
     const arquivos = gravar(config.eventsFile, rows);
@@ -98,6 +89,44 @@ async function main(): Promise<void> {
   } finally {
     await stopSession(client);
   }
+}
+
+type GrupoBruto = Omit<GroupRow, 'monitorado'>;
+
+/**
+ * Pergunta ao servidor quais grupos a conta integra.
+ *
+ * `getAllGroups` do open-wa lê `Store.Chat`, que é só o que o WA Web tem em
+ * memória — nesta conta, 17 de 179 grupos, e nem esperar nem `client.refresh()`
+ * mudam isso. Ver `enrich/groupDirectory.ts`. Devolve null quando o servidor
+ * não responde; aí o ponto de partida é `npm run probe-groups`.
+ */
+async function consultarServidor(client: Client): Promise<GrupoBruto[] | null> {
+  const grupos = await new GroupDirectory(client, Infinity).all();
+  if (!grupos) {
+    log.warn('consulta de grupos ao servidor falhou; usando a lista em memória');
+    return null;
+  }
+  return grupos.map((g) => ({
+    id: g.id,
+    name: g.subject ?? '(sem nome)',
+    // Lista descartada por falta de telefone ainda tem tamanho útil aqui, mas
+    // o diretório não o guarda; "?" é honesto.
+    participantes: g.participants?.length ?? null,
+  }));
+}
+
+/** Reserva: o que o WA Web tem em memória, possivelmente só uma fração. */
+async function lerMemoria(client: Client): Promise<GrupoBruto[]> {
+  const groups = (await client.getAllGroups()) ?? [];
+  return groups.map((group) => ({
+    id: String((group as { id?: unknown }).id ?? ''),
+    name:
+      (group as { name?: string }).name ??
+      (group as { formattedTitle?: string }).formattedTitle ??
+      '(sem nome)',
+    participantes: contarParticipantes(group),
+  }));
 }
 
 /**
