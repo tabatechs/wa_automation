@@ -45,6 +45,7 @@ import {
   COLLECTIONS,
   type ActivityDailyDoc,
   type GroupDoc,
+  type GroupMembersDailyDoc,
   type MemberEventDoc,
   type MessageDoc,
   type MessageReadDoc,
@@ -81,6 +82,7 @@ class CounterBatch {
   private readonly people = new Map<string, PersonAccumulator>();
   private readonly groups = new Map<string, GroupAccumulator>();
   private readonly daily = new Map<string, DailyAccumulator>();
+  private readonly memberships = new Map<string, MembershipAccumulator>();
   private readonly messageRollups = new Map<
     string,
     { reactionsCount?: number; repliesCount?: number; readsCount?: number }
@@ -113,6 +115,17 @@ class CounterBatch {
     if (!acc) {
       acc = new DailyAccumulator(id, groupId, personId, date);
       this.daily.set(id, acc);
+    }
+    return acc;
+  }
+
+  /** Quem estava no grupo naquele dia — a série de composição. */
+  membership(groupId: string, date: string): MembershipAccumulator {
+    const id = `${groupId}|${date}`;
+    let acc = this.memberships.get(id);
+    if (!acc) {
+      acc = new MembershipAccumulator(id, groupId, date);
+      this.memberships.set(id, acc);
     }
     return acc;
   }
@@ -157,6 +170,7 @@ class CounterBatch {
       this.people.size === 0 &&
       this.groups.size === 0 &&
       this.daily.size === 0 &&
+      this.memberships.size === 0 &&
       this.messageRollups.size === 0
     );
   }
@@ -171,6 +185,10 @@ class CounterBatch {
 
   dailyOps(): AnyBulkWriteOperation<ActivityDailyDoc>[] {
     return [...this.daily.values()].map((a) => a.toOp());
+  }
+
+  membershipOps(): AnyBulkWriteOperation<GroupMembersDailyDoc>[] {
+    return [...this.memberships.values()].map((a) => a.toOp());
   }
 
   messageRollupOps(): AnyBulkWriteOperation<MessageDoc>[] {
@@ -342,6 +360,52 @@ class GroupAccumulator {
     return {
       updateOne: { filter: { _id: this.groupId }, update, upsert: true },
     } as AnyBulkWriteOperation<GroupDoc>;
+  }
+}
+
+/**
+ * A composição de um grupo num dia.
+ *
+ * Só acrescenta, nunca remove: um snapshot que chegue pela metade — a falha
+ * mais comum do WA Web — não tem como apagar quem já foi visto no grupo
+ * naquele dia. Ver `GroupMembersDailyDoc`.
+ */
+class MembershipAccumulator {
+  private readonly members = new Set<string>();
+  private readonly admins = new Set<string>();
+  private capturedAt: Date | null = null;
+
+  constructor(
+    readonly id: string,
+    private readonly groupId: string,
+    private readonly date: string,
+  ) {}
+
+  add(personId: string, isAdmin: boolean): this {
+    this.members.add(personId);
+    if (isAdmin) this.admins.add(personId);
+    return this;
+  }
+
+  seenAt(when: Date): this {
+    if (!this.capturedAt || when > this.capturedAt) this.capturedAt = when;
+    return this;
+  }
+
+  toOp(): AnyBulkWriteOperation<GroupMembersDailyDoc> {
+    const addToSet: Document = { members: { $each: [...this.members] } };
+    if (this.admins.size) addToSet.admins = { $each: [...this.admins] };
+    return {
+      updateOne: {
+        filter: { _id: this.id },
+        update: {
+          $setOnInsert: { groupId: this.groupId, date: this.date },
+          $addToSet: addToSet,
+          ...(this.capturedAt ? { $max: { capturedAt: this.capturedAt } } : {}),
+        },
+        upsert: true,
+      },
+    } as AnyBulkWriteOperation<GroupMembersDailyDoc>;
   }
 }
 
@@ -934,16 +998,22 @@ export class Ingestor {
     // que esvaziou — sobrescrever a lista com ele apagaria os participantes.
     if (!groupId || payload.participants.length === 0) return;
 
+    const when = new Date(event.capturedAt);
     const group = batch.group(groupId, payload.subject ?? event.group?.name ?? null);
-    group.eventAt(new Date(event.capturedAt));
+    group.eventAt(when);
+
+    // A composição do dia é a única coisa aqui que não dá para recalcular
+    // depois: o WhatsApp só responde pelo estado de agora.
+    const membership = batch.membership(groupId, timeParts(when).date).seenAt(when);
 
     for (const participant of payload.participants) {
       const identity = resolveIdentity(participant);
       if (!identity) continue;
+      membership.add(identity.personId, participant.isAdmin === true);
       batch
         .person(identity)
         .linkGroup(groupId, { active: true, isAdmin: participant.isAdmin })
-        .seenAt(new Date(event.capturedAt));
+        .seenAt(when);
     }
   }
 
@@ -958,6 +1028,7 @@ export class Ingestor {
     await Promise.all([
       this.bulk(COLLECTIONS.groups, batch.groupOps()),
       this.bulk(COLLECTIONS.activityDaily, batch.dailyOps()),
+      this.bulk(COLLECTIONS.groupMembersDaily, batch.membershipOps()),
       this.bulk(COLLECTIONS.messages, batch.messageRollupOps()),
     ]);
   }

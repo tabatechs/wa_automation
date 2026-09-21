@@ -435,6 +435,64 @@ async function run() {
     const raw = store.collections.get('events');
     assert.ok(!raw || raw.docs.size === 0, 'snapshot fica fora do log bruto');
     ok('snapshot não entra no log bruto');
+
+    // A composição do dia é a única coisa do snapshot que fica gravada.
+    const dia = store.get('group_members_daily').docs.get(`${GROUP}|2026-08-12`);
+    assert.deepStrictEqual(dia?.members, ['5511955554444']);
+    assert.strictEqual(dia?.date, '2026-08-12', 'dia em São Paulo, não em UTC');
+    ok('snapshot grava quem estava no grupo naquele dia');
+  }
+
+  // === 8b. lista pela metade não apaga quem já foi visto no dia ===
+  {
+    // A falha mais comum do WA Web é devolver a lista incompleta. Se o último
+    // snapshot do dia mandasse na linha, um grupo de 800 pessoas viraria um de
+    // 3 — e o dia não volta para ser recapturado.
+    const store = new FakeStore();
+    const ingestor = new Ingestor(store as never, true);
+    const membro = (phone: string, isAdmin = false) => ({
+      id: `${phone}@c.us`, phone: `+${phone}`,
+      name: null, nameSource: null, isAdmin, isSuperAdmin: false,
+    });
+    const snap = (participants: ReturnType<typeof membro>[], at: string): CapturedEvent => ({
+      schema: EVENT_SCHEMA_VERSION,
+      eventId: `uuid-${at}`,
+      type: 'group_snapshot',
+      capturedAt: at,
+      group: { id: GROUP, name: 'Grupo de exemplo' },
+      actor: null,
+      payload: {
+        subject: 'Grupo de exemplo', description: null, owner: null,
+        participantCount: participants.length, participants, reason: 'boot',
+      },
+    });
+
+    await ingestor.apply([
+      snap([membro('5511911111111', true), membro('5511922222222')], '2026-08-12T12:00:00.000Z'),
+      snap([membro('5511911111111', true)], '2026-08-12T20:00:00.000Z'),
+      // No dia seguinte o grupo já não tem mais o segundo membro.
+      snap([membro('5511911111111', true)], '2026-08-13T12:00:00.000Z'),
+    ]);
+
+    const membros = store.get('group_members_daily');
+    const dia = membros.docs.get(`${GROUP}|2026-08-12`);
+    assert.deepStrictEqual(
+      (dia?.members as string[]).sort(),
+      ['5511911111111', '5511922222222'],
+      'o segundo snapshot, menor, não pode apagar ninguém do dia',
+    );
+    assert.deepStrictEqual(dia?.admins, ['5511911111111']);
+    ok('lista truncada não encolhe a composição do dia');
+
+    // "Só cresce" vale dentro do dia. Cada dia é um documento novo, que nasce
+    // vazio — senão quem sai do grupo ficaria na série para sempre.
+    const seguinte = membros.docs.get(`${GROUP}|2026-08-13`);
+    assert.deepStrictEqual(
+      seguinte?.members,
+      ['5511911111111'],
+      'quem saiu não aparece no dia seguinte',
+    );
+    ok('quem sai do grupo some da série a partir do dia seguinte');
   }
 
   // === 9. _id do log bruto é determinístico ===

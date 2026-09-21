@@ -42,6 +42,7 @@ inteiro é idempotente: os contadores não se mexem.
 | **`people`** | uma pessoa | `5511988812345` ou `lid:1993724658` | **leitura principal** — quem convidar |
 | **`groups`** | um grupo | `120363...@g.us` | **leitura principal** — saúde do grupo |
 | `activity_daily` | um dia de um grupo (ou de uma pessoa num grupo) | `grupo\|pessoa\|2026-08-17` | série temporal |
+| `group_members_daily` | quem estava num grupo num dia | `grupo\|2026-08-17` | série de composição — ver §3.1 |
 | `messages` | uma mensagem | `messageId` do WhatsApp | matéria-prima + rollups |
 | `reactions` | uma reação | `msg\|ator\|emoji` | estado atual (`active`) |
 | `message_reads` | alguém abriu uma mensagem sua | `msg\|ator` | só mensagens `fromMe` |
@@ -323,6 +324,7 @@ _id: "120363...@g.us|_all|2026-08-17"          ← linha do grupo
 | `reactionsGiven` | de `reactions` ativas, pela data de `addedAt` |
 | `messagesRead` | de `message_reads`, pela data de `readAt` |
 | `activeMembers` | só na linha do grupo: autores distintos no dia |
+| `memberCount` | só na linha do grupo: quantas pessoas eram membros no dia (do recálculo, copiado de `group_members_daily`) |
 
 Esta coleção existe para não inflar `groups` com histórico — um documento do
 Mongo tem teto de 16 MB e a série cresce sem fim. É daqui que saem curvas de
@@ -332,6 +334,75 @@ mensagens/dia, retenção e qualquer recorte temporal.
 bater com `groups.totalMessages`. Se não bate, há linha órfã de uma fusão de
 identidade (o recálculo apaga essas linhas, porque o `personId` está no `_id` e
 não há como repontá-lo).
+
+### 3.1 `group_members_daily` — quem estava em cada grupo, dia a dia
+
+Um documento por `(grupo, dia)`, com os `personId` dentro. É a série que
+responde **quantas pessoas distintas existem no conjunto dos grupos**, que
+nenhuma soma por grupo responde: a mesma pessoa costuma estar em vários, e
+somar `memberCount` a conta tantas vezes quantos grupos ela integra.
+
+```
+_id: "120363...@g.us|2026-09-21"   ← um grupo naquele dia
+_id: "_all|2026-09-21"             ← a união de todos os grupos naquele dia
+```
+
+| campo | o que é |
+|---|---|
+| `members` | `personId` de quem esteve no grupo naquele dia. **Vazio na linha `_all`** — repetir os ids de todo mundo dobraria o espaço da série |
+| `admins` | quem era admin naquele dia |
+| `memberCount` | `members.length`; na linha `_all`, pessoas **distintas** no conjunto dos grupos |
+| `cumulativeMemberCount` | só na `_all`: distintas desde o primeiro dia da série — quantas pessoas já passaram pelos grupos |
+| `groups` | só na `_all`: quantos grupos entraram na conta do dia |
+| `capturedAt` | o snapshot mais recente que alimentou a linha |
+
+Três coisas a saber antes de usar:
+
+**A lista é a união do dia, não o retrato do fim do dia.** Cada snapshot só
+acrescenta (`$addToSet`). É de propósito: lista truncada é a falha mais comum
+do WA Web, e assim nenhuma sincronização pela metade apaga membro conhecido —
+o dia já passou e não volta para ser recapturado. O preço é que quem saiu no
+meio do dia ainda conta naquele dia e some no seguinte. Para a data exata de
+entrada e saída, a coleção é `member_events`.
+
+**A linha de um dia só existe se houve snapshot nele.** O snapshot sai no boot
+do monitor e a cada mudança de participantes; com um reinício por dia, há uma
+linha por dia. Se o monitor ficar dias no ar sem mudança de participantes num
+grupo fora da memória do WA Web, esse grupo fica sem linha nesses dias — quem
+plota a série precisa **repetir o último valor conhecido** em vez de ler zero.
+
+**A série começa quando a coleção começou.** Não há como reconstruir dias
+anteriores: o WhatsApp só responde pelo estado de agora, e `people.groups[]`
+guarda o quadro atual, sem história.
+
+Consultas:
+
+```js
+// alcance dia a dia, todos os grupos
+db.group_members_daily.find({ groupId: '_all' }).sort({ date: 1 })
+
+// pessoas distintas num recorte de grupos, num dia
+db.group_members_daily.aggregate([
+  { $match: { date: '2026-09-21', groupId: { $in: [/* ids */] } } },
+  { $unwind: '$members' },
+  { $group: { _id: null, pessoas: { $addToSet: '$members' } } },
+  { $project: { total: { $size: '$pessoas' } } },
+])
+
+// o mesmo, robusto a grupo sem linha naquele dia: pega a última linha de
+// cada grupo até a data. É esta que se usa num recorte qualquer de grupos.
+db.group_members_daily.aggregate([
+  { $match: { date: { $lte: '2026-09-21' }, groupId: { $in: [/* ids */] } } },
+  { $sort: { date: 1 } },
+  { $group: { _id: '$groupId', members: { $last: '$members' }, date: { $last: '$date' } } },
+  { $unwind: '$members' },
+  { $group: { _id: null, pessoas: { $addToSet: '$members' } } },
+  { $project: { total: { $size: '$pessoas' } } },
+])
+
+// quem entrou e quem saiu de um grupo entre dois dias
+// (diferença entre os dois arrays `members`)
+```
 
 ---
 
@@ -495,13 +566,17 @@ de segurança contra qualquer deriva do caminho incremental, e o que se roda
 A ordem interna da passada não é arbitrária:
 
 1. **fusão de identidades** — `lid:` provisórios que ganharam telefone; reponta
-   `messages`/`reactions`/`member_events`, senão o provisório renasce na passada
-   seguinte
+   `messages`/`reactions`/`member_events` e troca o id dentro das listas de
+   `group_members_daily`, senão o provisório renasce na passada seguinte — ou,
+   pior, a mesma pessoa é contada duas vezes no alcance de um dia passado
 2. **rollups das mensagens** — `reactionsCount`, `repliesCount`, `readsCount`,
    recontados da fonte (resolve a reação que chegou antes da mensagem)
 3. **série diária** — reescrita, o que absorve as fusões do passo 1
-4. `--full`: recontagem dos contadores brutos + histogramas
-5. **derivados de `people`** → 6. **derivados de `groups`** → 7. **score e tier**
+4. **série de composição** — `memberCount` de cada linha, a união do dia e o
+   acumulado (`_all`); é o único passo que só conta, sem reconstruir nada: as
+   listas vêm do caminho quente e não têm fonte para onde voltar
+5. `--full`: recontagem dos contadores brutos + histogramas
+6. **derivados de `people`** → 7. **derivados de `groups`** → 8. **score e tier**
 
 O score é o último porque depende de tudo que veio antes.
 
@@ -530,6 +605,9 @@ não basta se o contador que ele somou não for desfeito à mão.
 - Só grupos da whitelist `MONITORED_GROUPS` são gravados. Nada fora dela existe
   aqui.
 - Quem entrou e saiu antes do monitor subir pode não ter documento nenhum.
+- **A série de composição (`group_members_daily`) começa em 21/09/2026.** Antes
+  disso o quadro de membros só existia no presente, em `people.groups[]`; dias
+  anteriores não têm como ser reconstruídos.
 - Conteúdo apagado depois da captura permanece — o monitor não vê a exclusão.
 - Nenhuma métrica mede intenção. `engagementScore` mede comportamento observável
   num grupo de WhatsApp; a decisão de convidar é de quem lê.

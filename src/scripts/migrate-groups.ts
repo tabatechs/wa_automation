@@ -33,6 +33,10 @@
  * - `group_snapshot` sai de `people.groups[]`: a lista de participantes de um
  *   grupo é exatamente quem tem vínculo ativo com ele. É o único caminho, e é
  *   o que repõe `memberCount`, `participants[]` e `admins` no destino.
+ *   Como o snapshot remontado é de hoje, o destino recebe **um dia** de
+ *   `group_members_daily` — o de hoje. A série de composição anterior fica no
+ *   conjunto de origem: ela não sai de evento nenhum, e copiá-la seria copiar
+ *   documento, que é justamente o que este script não faz.
  *
  * ## O que a remontagem NÃO carrega: campo escrito por outra ferramenta
  *

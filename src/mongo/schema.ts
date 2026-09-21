@@ -22,8 +22,18 @@ export const COLLECTIONS = {
   messageReads: 'message_reads',
   memberEvents: 'member_events',
   activityDaily: 'activity_daily',
+  groupMembersDaily: 'group_members_daily',
   events: 'events',
 } as const;
+
+/**
+ * Ocupa o lugar do grupo na linha que soma todos eles.
+ *
+ * Não é id de grupo nenhum (todo id real termina em `@g.us`), então nenhuma
+ * consulta por grupo casa com ela por acidente — mas quem varrer a coleção
+ * inteira precisa excluí-la, ou soma o total duas vezes.
+ */
+export const ALL_GROUPS = '_all';
 
 export type CollectionName = (typeof COLLECTIONS)[keyof typeof COLLECTIONS];
 
@@ -362,6 +372,46 @@ export interface ActivityDailyDoc {
   repliesSent: number;
   pollVotes: number;
   messagesRead: number;
+  /** Só na linha do grupo: quantas pessoas eram membros no dia. Do recálculo. */
+  memberCount?: number;
+}
+
+/**
+ * Quem estava em cada grupo em cada dia — a composição, não a atividade.
+ *
+ * É a única métrica que **não dá para reconstruir depois**: o WhatsApp só
+ * responde pelo estado de agora, e `people.groups[]` guarda o quadro atual. Sem
+ * esta série, "quantas pessoas distintas alcançamos" só existe no presente.
+ *
+ * Uma linha por grupo por dia, com os ids dentro. A alternativa — uma linha por
+ * pessoa por dia, como em `activity_daily` — custaria umas trinta vezes mais
+ * espaço para dizer o mesmo: são ~5 mil vínculos por dia, que cabem em ~100 KB
+ * de array e não em 5 mil documentos.
+ *
+ * A lista é a **união do dia**, não o retrato do fim do dia: cada snapshot só
+ * acrescenta (`$addToSet`). É de propósito. Lista truncada é a falha mais
+ * comum do WA Web (ver CLAUDE.md), e assim nenhuma sincronização pela metade
+ * apaga membro conhecido. O preço é que quem saiu no meio do dia ainda conta
+ * naquele dia e some no seguinte — para a data exata da saída existe
+ * `member_events`.
+ */
+export interface GroupMembersDailyDoc {
+  /** `${groupId}|${YYYY-MM-DD}`, com `_all` no lugar do grupo na união. */
+  _id: string;
+  /** `_all` (`ALL_GROUPS`) na linha que junta todos os grupos do dia. */
+  groupId: string;
+  date: string;
+  /** Do snapshot mais recente que alimentou a linha. */
+  capturedAt: Date;
+  /** Vazio na linha de união: repetir os ids de todo mundo dobraria o custo. */
+  members: string[];
+  admins: string[];
+  /** `members.length`, gravado pelo recálculo para não exigir `$size` na leitura. */
+  memberCount?: number;
+  /** Só na união: pessoas distintas desde o primeiro dia da série. */
+  cumulativeMemberCount?: number;
+  /** Só na união: quantos grupos entraram na conta do dia. */
+  groups?: number;
 }
 
 /** Cópia fiel do evento do JSONL, quando `MONGO_RAW_LOG` está ligado. */
@@ -413,6 +463,11 @@ export const INDEXES: Record<CollectionName, IndexDescription[]> = {
   [COLLECTIONS.activityDaily]: [
     { key: { groupId: 1, date: -1 } },
     { key: { personId: 1, date: -1 } },
+  ],
+  [COLLECTIONS.groupMembersDaily]: [
+    { key: { groupId: 1, date: -1 } },
+    // A série do alcance é sempre uma janela de datas, com ou sem grupo.
+    { key: { date: -1 } },
   ],
   [COLLECTIONS.events]: [{ key: { capturedAt: -1 } }, { key: { type: 1 } }],
 };

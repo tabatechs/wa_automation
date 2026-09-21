@@ -18,18 +18,20 @@
  *     conhecido, quando o vínculo finalmente aparece.
  */
 
-import type { Db, Document } from 'mongodb';
+import type { AnyBulkWriteOperation, Db, Document } from 'mongodb';
 import { createLogger } from '../util/logger';
 import { dateKey, dateKeyDaysAgo, daysBetween, localIso, TIMEZONE } from '../util/time';
 import { PENDING_PREFIX } from './identity';
 import { SCORING, tierOf } from './scoring';
 import type { MongoStore } from './client';
 import {
+  ALL_GROUPS,
   COLLECTIONS,
   OBSERVED_ONLY,
   newGroupCounters,
   newPersonCounters,
   type GroupDoc,
+  type GroupMembersDailyDoc,
   type PersonDoc,
 } from './schema';
 
@@ -73,6 +75,7 @@ export class MetricsBuilder {
       stats.merged = await this.mergePendingIdentities(db);
       await this.rebuildMessageRollups(db);
       await this.rebuildActivityDaily(db);
+      await this.rebuildMembershipDaily(db);
       if (options.full) await this.recountHotCounters(db);
       stats.people = await this.refreshPeople(db);
       stats.groups = await this.refreshGroups(db);
@@ -200,6 +203,13 @@ export class MetricsBuilder {
       // abaixo, a partir de `messages`.
       db.collection(this.col(COLLECTIONS.activityDaily)).deleteMany({ personId: source._id }),
     ]);
+
+    // A série de composição guarda ids dentro de um array, e apagar a linha
+    // não é opção: ela é o retrato de um dia que já passou e não se remonta.
+    // Em dois passos porque `$addToSet` e `$pull` no mesmo campo brigariam —
+    // e nesta ordem, porque o alvo pode já estar na lista e o provisório
+    // some sem deixar a pessoa de fora.
+    await this.repointMembership(db, source._id, target._id);
 
     await people.deleteOne({ _id: source._id });
     log.debug('pessoa fundida', { de: source._id, para: target._id });
@@ -449,6 +459,125 @@ export class MetricsBuilder {
 
     const { deletedCount } = await daily.deleteMany({ personId: { $in: orfaos } });
     log.debug('linhas órfãs da série removidas', { pessoas: orfaos.length, linhas: deletedCount });
+  }
+
+  /** Troca o id de uma pessoa dentro das listas diárias, sem perder o dia. */
+  private async repointMembership(db: Db, de: string, para: string): Promise<void> {
+    const collection = db.collection<GroupMembersDailyDoc>(
+      this.col(COLLECTIONS.groupMembersDaily),
+    );
+    for (const campo of ['members', 'admins'] as const) {
+      await collection.updateMany({ [campo]: de }, { $addToSet: { [campo]: para } });
+      await collection.updateMany({ [campo]: de }, { $pull: { [campo]: de } });
+    }
+  }
+
+  /**
+   * Fecha a série de composição dos grupos.
+   *
+   * O caminho quente grava só quem estava em cada grupo em cada dia. Aqui saem
+   * as contas: o tamanho de cada lista e, principalmente, a **união do dia** —
+   * quantas pessoas distintas estavam em algum dos grupos. Somar `memberCount`
+   * por grupo responde outra pergunta: a mesma pessoa costuma estar em vários,
+   * e a soma conta cada uma tantas vezes quantos grupos ela integra.
+   *
+   * O acumulado atravessa os dias em ordem, em JS, porque união de conjuntos
+   * ao longo do tempo não é soma e nenhum `$group` a produz.
+   */
+  private async rebuildMembershipDaily(db: Db): Promise<void> {
+    const collection = db.collection<GroupMembersDailyDoc>(
+      this.col(COLLECTIONS.groupMembersDaily),
+    );
+    const porGrupo = { groupId: { $ne: ALL_GROUPS } };
+
+    // Uma passada só, em ordem de data: a mesma varredura conta cada linha,
+    // junta o dia e acumula o histórico. Ler tudo é o preço de uma união de
+    // conjuntos — ela não sai de `$group` nem de soma.
+    const linhas = collection
+      .find(porGrupo)
+      .project<{ _id: string; groupId: string; date: string; members: string[]; memberCount?: number }>(
+        { groupId: 1, date: 1, members: 1, memberCount: 1 },
+      )
+      .sort({ date: 1 });
+
+    const acumulado = new Set<string>();
+    const ops: AnyBulkWriteOperation<GroupMembersDailyDoc>[] = [];
+    let dia: { date: string; pessoas: Set<string>; grupos: number } | null = null;
+
+    const fecharDia = (): void => {
+      if (!dia) return;
+      for (const personId of dia.pessoas) acumulado.add(personId);
+      ops.push({
+        updateOne: {
+          filter: { _id: `${ALL_GROUPS}|${dia.date}` },
+          update: {
+            $set: {
+              groupId: ALL_GROUPS,
+              date: dia.date,
+              // Os ids já estão nas linhas dos grupos; repeti-los aqui dobraria
+              // o espaço da série para não dizer nada novo.
+              members: [],
+              admins: [],
+              memberCount: dia.pessoas.size,
+              cumulativeMemberCount: acumulado.size,
+              groups: dia.grupos,
+            },
+          },
+          upsert: true,
+        },
+      } as AnyBulkWriteOperation<GroupMembersDailyDoc>);
+      dia = null;
+    };
+
+    for await (const linha of linhas) {
+      const membros = linha.members ?? [];
+      if (dia && dia.date !== linha.date) fecharDia();
+      dia ??= { date: linha.date, pessoas: new Set(), grupos: 0 };
+      dia.grupos += 1;
+      for (const personId of membros) dia.pessoas.add(personId);
+
+      // Só grava o que mudou: em regime, isso é a linha de hoje e mais nada.
+      if (linha.memberCount !== membros.length) {
+        ops.push({
+          updateOne: {
+            filter: { _id: linha._id },
+            update: { $set: { memberCount: membros.length } },
+          },
+        } as AnyBulkWriteOperation<GroupMembersDailyDoc>);
+      }
+    }
+    fecharDia();
+
+    if (ops.length === 0) return;
+    await collection.bulkWrite(ops, { ordered: false });
+
+    // O mesmo número ao lado das mensagens do dia: `activity_daily` é a série
+    // que já se lê para saber como o grupo se comportou, e "quantos membros
+    // ele tinha" é o denominador da maior parte dessas contas.
+    await collection
+      .aggregate([
+        { $match: porGrupo },
+        {
+          $project: {
+            _id: { $concat: ['$groupId', '|_all|', '$date'] },
+            groupId: 1,
+            personId: { $literal: null },
+            date: 1,
+            memberCount: { $size: { $ifNull: ['$members', []] } },
+          },
+        },
+        {
+          $merge: {
+            into: this.col(COLLECTIONS.activityDaily),
+            on: '_id',
+            whenMatched: 'merge',
+            whenNotMatched: 'insert',
+          },
+        },
+      ])
+      .toArray();
+
+    log.debug('série de composição atualizada', { pessoasDistintas: acumulado.size });
   }
 
   // -------------------------------------------------------------------------
