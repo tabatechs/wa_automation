@@ -13,9 +13,17 @@
 import type { Client } from '@open-wa/wa-automate';
 import { createLogger } from '../util/logger';
 import { preparePage } from '../util/page';
+import { localIso } from '../util/time';
 import { isLid, normalizeLid } from './lid';
 
 const log = createLogger('group-directory');
+
+/** Entre duas idas bem-sucedidas ao servidor, mesmo com `invalidate()`. */
+const INTERVALO_MINIMO_MS = 5 * 60 * 1000;
+/** Depois de falha que não é limite (página instável, módulo sumido). */
+const PAUSA_FALHA_MS = 60 * 1000;
+/** Depois de 429. O servidor não diz quanto esperar; 15 min é conservador. */
+const PAUSA_LIMITE_MS = 15 * 60 * 1000;
 
 export interface DirectoryParticipant {
   /** `@c.us` quando o servidor dá o telefone; `@lid` só quando não dá. */
@@ -120,8 +128,16 @@ export class GroupDirectory implements GroupSource {
   private buscadoEm = 0;
   private emVoo: Promise<Map<string, DirectoryGroup> | null> | null = null;
   private avisouIndisponivel = false;
-  /** Sem lista nenhuma, não insistir a cada chamada: o boot faz 161 seguidas. */
-  private falhouEm = 0;
+  /**
+   * Antes disto, ninguém vai ao servidor — nem `invalidate()`. É a consulta
+   * mais pesada que o monitor faz (a conta inteira, ~5 mil participantes), e
+   * em 23/09/2026 o servidor passou a responder 429 `rate-overlimit`: cada
+   * entrada de participante invalidava o diretório e cada `get()` depois de
+   * uma falha consultava de novo. Uma lista de alguns minutos atrás é tão boa
+   * quanto a de agora para o que ela serve (quem está em cada grupo; a
+   * reconciliação de membros corrige o resto).
+   */
+  private proximaIdaEm = 0;
 
   constructor(
     private client: Client,
@@ -133,7 +149,11 @@ export class GroupDirectory implements GroupSource {
     this.invalidate();
   }
 
-  /** A próxima consulta vai ao servidor. Chamado quando participantes mudam. */
+  /**
+   * A próxima consulta que o intervalo mínimo permitir vai ao servidor.
+   * Chamado quando participantes mudam — o que num grupo grande é várias
+   * vezes por hora, por isso não fura `proximaIdaEm`.
+   */
   invalidate(): void {
     this.buscadoEm = 0;
   }
@@ -150,8 +170,8 @@ export class GroupDirectory implements GroupSource {
   }
 
   private async carregar(): Promise<Map<string, DirectoryGroup> | null> {
+    if (Date.now() < this.proximaIdaEm) return this.grupos;
     if (this.grupos && Date.now() - this.buscadoEm < this.ttlMs) return this.grupos;
-    if (!this.grupos && Date.now() - this.falhouEm < 60_000) return null;
     // Um snapshot por grupo no boot pede o diretório 161 vezes seguidas; todas
     // esperam a mesma ida ao servidor.
     this.emVoo ??= this.buscar().finally(() => {
@@ -162,17 +182,43 @@ export class GroupDirectory implements GroupSource {
 
   private async buscar(): Promise<Map<string, DirectoryGroup> | null> {
     const resultado = await this.consultar();
+    if (resultado === 'limite') {
+      this.proximaIdaEm = Date.now() + PAUSA_LIMITE_MS;
+      log.warn('servidor limitou a consulta de grupos (429); pausando', {
+        ate: localIso(new Date(this.proximaIdaEm)),
+      });
+      return this.grupos;
+    }
     if (resultado) {
       this.grupos = resultado;
       this.buscadoEm = Date.now();
+      this.proximaIdaEm = Date.now() + INTERVALO_MINIMO_MS;
       return resultado;
     }
-    this.falhouEm = Date.now();
+    this.proximaIdaEm = Date.now() + PAUSA_FALHA_MS;
     // A lista anterior, se houver, ainda é melhor que nenhuma.
     return this.grupos;
   }
 
-  private async consultar(): Promise<Map<string, DirectoryGroup> | null> {
+  /**
+   * Logo depois do `create()` o WA Web ainda está sincronizando e o
+   * `queryAllGroups` lança um erro minificado (`t: t`, em 23/09/2026, 160 ms
+   * depois de "sessão pronta"). Algumas tentativas espaçadas cobrem página
+   * ainda instável. 429 (`rate-overlimit`) é outra coisa: o servidor recusou,
+   * e repetir em segundos só prolonga o bloqueio — sai na hora.
+   */
+  private async consultar(): Promise<Map<string, DirectoryGroup> | null | 'limite'> {
+    const esperas = [0, 5_000, 15_000];
+    for (const [i, espera] of esperas.entries()) {
+      if (espera) await new Promise((r) => setTimeout(r, espera));
+      const r = await this.consultarUmaVez();
+      if (r !== 'erro') return r;
+      if (i < esperas.length - 1) log.info('repetindo consulta de grupos ao servidor', { tentativa: i + 2 });
+    }
+    return null;
+  }
+
+  private async consultarUmaVez(): Promise<Map<string, DirectoryGroup> | null | 'erro' | 'limite'> {
     let page: PageLike | null = null;
     try {
       page = this.client.getPage() as unknown as PageLike;
@@ -191,7 +237,31 @@ export class GroupDirectory implements GroupSource {
           | { queryAllGroups?: () => Promise<unknown> }
           | undefined;
         if (typeof mod?.queryAllGroups !== 'function') return null;
-        const res = await mod.queryAllGroups();
+        let res: unknown;
+        try {
+          res = await mod.queryAllGroups();
+        } catch (e) {
+          // O erro do WA Web é minificado: `String(e)` dá "t: t". O que
+          // identifica a falha está em campos próprios e no stack.
+          const o = (e ?? {}) as Record<string, unknown> & { stack?: unknown };
+          const campos: Record<string, string> = {};
+          for (const k of Object.getOwnPropertyNames(o).slice(0, 15)) {
+            if (k === 'stack') continue;
+            try {
+              campos[k] = String(o[k]).slice(0, 120);
+            } catch {
+              /* getter que lança */
+            }
+          }
+          return {
+            erro: {
+              texto: String(e).slice(0, 120),
+              construtor: (o as { constructor?: { name?: string } }).constructor?.name ?? null,
+              campos,
+              stack: String(o.stack ?? '').split('\n').slice(0, 4).join(' | '),
+            },
+          };
+        }
         if (!Array.isArray(res)) return null;
 
         const texto = (x: unknown): string => {
@@ -234,8 +304,14 @@ export class GroupDirectory implements GroupSource {
             },
           };
         });
-      })) as Array<{ inStore: boolean; raw: Record<string, unknown> }> | null;
+      })) as Array<{ inStore: boolean; raw: Record<string, unknown> }> | { erro: unknown } | null;
 
+      if (crus && !Array.isArray(crus)) {
+        const erro = crus.erro as { campos?: Record<string, string> };
+        if (erro.campos?.statusCode === '429' || erro.campos?.message === 'rate-overlimit') return 'limite';
+        log.warn('consulta de grupos ao servidor falhou', erro);
+        return 'erro';
+      }
       if (!crus) {
         if (!this.avisouIndisponivel) {
           log.warn('WAWebGroupQueryJob.queryAllGroups indisponível; ver `npm run probe-groups`');
@@ -270,7 +346,7 @@ export class GroupDirectory implements GroupSource {
       return grupos;
     } catch (error) {
       log.warn('consulta de grupos ao servidor falhou', { error: String(error) });
-      return null;
+      return 'erro';
     }
   }
 }

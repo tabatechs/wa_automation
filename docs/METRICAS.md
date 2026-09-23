@@ -371,9 +371,15 @@ linha por dia. Se o monitor ficar dias no ar sem mudança de participantes num
 grupo fora da memória do WA Web, esse grupo fica sem linha nesses dias — quem
 plota a série precisa **repetir o último valor conhecido** em vez de ler zero.
 
-**A série começa quando a coleção começou.** Não há como reconstruir dias
-anteriores: o WhatsApp só responde pelo estado de agora, e `people.groups[]`
-guarda o quadro atual, sem história.
+**A série começa quando a coleção começou**, em 21/09/2026. O WhatsApp só
+responde pelo estado de agora e `people.groups[]` guarda o quadro atual, sem
+história — mas o JSONL **tem** os `group_snapshot` antigos (quem os deixa de
+fora é só o log bruto no Mongo), então um `mongo:import` preencheria dias
+anteriores. **Não faça isso sem marcar o período na leitura.** Antes de
+16/09/2026 os grupos fora da memória do WA Web devolviam lista vazia, então o
+trecho antigo cobriria uns 17 dos 161 grupos e a curva de alcance daria um
+salto no dia em que a coleção nasceu — salto que parece crescimento real para
+quem olha o gráfico.
 
 Consultas:
 

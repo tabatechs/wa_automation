@@ -285,7 +285,12 @@ snapshots sem participante.
 A lista completa vem do servidor, por
 `require('WAWebGroupQueryJob').queryAllGroups()`, numa ida só.
 `src/enrich/groupDirectory.ts` guarda o resultado (TTL de `ROSTER_TTL_MS`,
-derrubado a cada mudança de participantes) e marca `inStore` por grupo. O
+derrubado a cada mudança de participantes) e marca `inStore` por grupo. É a
+consulta mais pesada do projeto e o servidor a limita: em 23/09/2026 passou a
+responder 429 `rate-overlimit`, porque cada entrada de participante forçava
+uma nova ida. Por isso há um intervalo mínimo de 5 min entre idas que nem
+`invalidate()` fura, e um 429 pausa o diretório por 15 min em vez de repetir —
+insistir prolonga o bloqueio. Enquanto isso vale a última lista boa. O
 `Roster` usa o store para quem está em memória — é de lá que vem o nome — e o
 servidor para o resto, sem a espera. Assunto e nome do grupo seguem a mesma
 regra, e o backfill pula quem está fora. O servidor entrega todo participante com
