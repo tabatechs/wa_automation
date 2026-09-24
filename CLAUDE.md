@@ -82,6 +82,7 @@ npm run mongo:migrate  # move grupos de um sufixo de coleção para outro
 npm run mongo:size     # uso do cluster vs. os 512 MB do plano gratuito
 npm run mongo:fix-members # remove member_events sem pessoa; --apply executa
 npm run mongo:fix-messages # tira de messages o que não é fala; --apply executa
+npm run mongo:roster-backfill -- <arquivos> # lista oficial do dia a partir do JSONL; --apply grava
 npm run probe-polls    # verifica se enquetes são capturáveis nesta sessão
 npm run probe-reads    # verifica se dá para saber quem leu as mensagens próprias
 npm run probe-groups   # compara os grupos em memória com os que o servidor devolve

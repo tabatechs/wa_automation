@@ -43,6 +43,7 @@ inteiro é idempotente: os contadores não se mexem.
 | **`groups`** | um grupo | `120363...@g.us` | **leitura principal** — saúde do grupo |
 | `activity_daily` | um dia de um grupo (ou de uma pessoa num grupo) | `grupo\|pessoa\|2026-08-17` | série temporal |
 | `group_members_daily` | quem estava num grupo num dia | `grupo\|2026-08-17` | série de composição — ver §3.1 |
+| `group_roster_daily` | a lista oficial de um grupo num dia (primeiro boot) | `grupo\|2026-09-21` | número oficial e saídas por dia — ver §3.2 |
 | `messages` | uma mensagem | `messageId` do WhatsApp | matéria-prima + rollups |
 | `reactions` | uma reação | `msg\|ator\|emoji` | estado atual (`active`) |
 | `message_reads` | alguém abriu uma mensagem sua | `msg\|ator` | só mensagens `fromMe` |
@@ -408,6 +409,89 @@ db.group_members_daily.aggregate([
 
 // quem entrou e quem saiu de um grupo entre dois dias
 // (diferença entre os dois arrays `members`)
+```
+
+Para **o número oficial** de pessoas e de saídas, a coleção é
+`group_roster_daily` (§3.2), não esta: aqui o número do dia muda a cada
+snapshot.
+
+### 3.2 `group_roster_daily` — a lista oficial do dia
+
+Um documento por `(grupo, dia)`, com a lista da **primeira varredura de boot**
+daquele dia. Responde as duas perguntas que `group_members_daily` não consegue
+responder com um número só:
+
+- **pessoas no grupo no dia D** = `members` da linha de D;
+- **saídas no dia D** = quem está em `members` da última linha anterior a D
+  daquele grupo e não está na de D. Por grupo, é a diferença; no total, são as
+  pessoas distintas que saíram de algum grupo.
+
+```
+_id: "120363...@g.us|2026-09-21"
+```
+
+| campo | o que é |
+|---|---|
+| `members` | `personId` (o `_id` de `people`) de cada participante no boot |
+| `admins` | quem era admin nesse boot |
+| `capturedAt` | horário do snapshot que virou a lista oficial |
+| `source` | sempre `boot` |
+
+Não há `memberCount`: use `$size: '$members'`. Um contador gravado ficaria
+errado depois de uma fusão de identidade que juntasse dois ids da mesma lista.
+
+**Por que o boot.** É a única varredura sem memória. O `Roster` nasce de novo a
+cada boot, então não há cache nem última lista boa (`lastGoodMembers`, sem TTL)
+para devolver lista velha: ou a lista veio do WhatsApp naquela hora, ou o
+snapshot sai vazio e é ignorado. Os snapshots de mudança de participantes
+podem vir do cache ou da última lista boa, e por isso não entram aqui.
+
+**Por que a primeira do dia.** Para o número não mudar ao longo do dia. A regra
+é literal: um reinício por crash às 02:20 ganha do reinício programado das
+04:30, porque os dois são varreduras completas e fixar pela ordem não depende
+de como a VM agenda o reinício. Um reinício à tarde não mexe na linha
+(`$setOnInsert`). Um grupo que entra na whitelist no meio do dia ganha a linha
+no primeiro boot em que aparece. Nesse dia ele não tem D−1 e, portanto, não
+tem saídas.
+
+**O que ela não vê.** Quem entra e sai entre dois boots não aparece em lista
+nenhuma. Para isso, e para o horário de cada movimento, a coleção é
+`member_events`. Saída aqui é "estava ontem e não está hoje", não um evento.
+
+**Sem boot no dia, sem linha.** O snapshot de boot só sai quando o monitor
+sobe. O reinício diário das 04:30 é agendado na VM, **fora deste
+repositório**; se ele deixar de rodar e o monitor ficar dias no ar, esses dias
+não têm lista oficial. Quem lê compara D com **a última linha anterior**
+daquele grupo, nunca com zero, e mostra o buraco como buraco.
+
+**Identidade.** A lista guarda o `_id` de `people`. Quando o recálculo funde um
+`lid:` provisório num telefone, `repointMembership` troca o id aqui também:
+sem isso, a pessoa "sairia" no dia da fusão e "entraria" de novo com o outro
+id.
+
+**Reconstrução.** `npm run mongo:roster-backfill -- <arquivos>` refaz a série a
+partir dos `group_snapshot` de boot do JSONL. Aceita `.jsonl` e `.jsonl.gz`,
+inclusive os rotacionados. Roda em seco por padrão e grava com `--apply`. Os
+ids passam pelo `_id` atual de `people` (id que ainda existe → ele; fundido →
+o destino, via `mergedFrom`; senão, pelo alias). Não filtra pela whitelist do
+`.env` de quem roda: o JSONL só tem grupo que estava na whitelist quando foi
+capturado. A regra de escrita é "o boot mais antigo do dia
+ganha", a mesma do caminho quente, e por isso os dois convergem e rodar de novo
+não muda nada. O corte padrão é `--desde 2026-09-17`: em 16/09, 149 dos 161
+grupos saíram vazios no boot, e antes disso os grupos fora da memória do WA Web
+sempre saíam vazios.
+
+```js
+// pessoas no grupo, dia a dia
+db.group_roster_daily.aggregate([
+  { $match: { groupId: '120363...@g.us' } },
+  { $project: { date: 1, pessoas: { $size: '$members' } } },
+  { $sort: { date: 1 } },
+])
+
+// saídas de um grupo no dia D: compare `members` de D com a última linha < D
+db.group_roster_daily.find({ groupId: '120363...@g.us', date: { $lte: '2026-09-24' } })
+  .sort({ date: -1 }).limit(2)
 ```
 
 ---

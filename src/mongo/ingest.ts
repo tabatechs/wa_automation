@@ -41,11 +41,13 @@ import { isSpeech } from '../util/messageTypes';
 import { timeParts } from '../util/time';
 import { resolveIdentity, stableActorKey, type PersonIdentity } from './identity';
 import type { MongoStore } from './client';
+import { earliest, rosterFromSnapshot } from './rosterDaily';
 import {
   COLLECTIONS,
   type ActivityDailyDoc,
   type GroupDoc,
   type GroupMembersDailyDoc,
+  type GroupRosterDailyDoc,
   type MemberEventDoc,
   type MessageDoc,
   type MessageReadDoc,
@@ -83,6 +85,7 @@ class CounterBatch {
   private readonly groups = new Map<string, GroupAccumulator>();
   private readonly daily = new Map<string, DailyAccumulator>();
   private readonly memberships = new Map<string, MembershipAccumulator>();
+  private readonly rosters = new Map<string, GroupRosterDailyDoc>();
   private readonly messageRollups = new Map<
     string,
     { reactionsCount?: number; repliesCount?: number; readsCount?: number }
@@ -130,6 +133,12 @@ class CounterBatch {
     return acc;
   }
 
+  /** Lista oficial do dia; entre dois boots do mesmo lote, fica o mais antigo. */
+  roster(candidate: GroupRosterDailyDoc): void {
+    const current = this.rosters.get(candidate._id);
+    this.rosters.set(candidate._id, current ? earliest(current, candidate) : candidate);
+  }
+
   /** Rollup na própria mensagem alvo: quantas reações ela recebeu. */
   addReactionToMessage(messageId: string, delta: number): void {
     const current = this.messageRollups.get(messageId) ?? {};
@@ -171,6 +180,7 @@ class CounterBatch {
       this.groups.size === 0 &&
       this.daily.size === 0 &&
       this.memberships.size === 0 &&
+      this.rosters.size === 0 &&
       this.messageRollups.size === 0
     );
   }
@@ -189,6 +199,18 @@ class CounterBatch {
 
   membershipOps(): AnyBulkWriteOperation<GroupMembersDailyDoc>[] {
     return [...this.memberships.values()].map((a) => a.toOp());
+  }
+
+  /**
+   * `$setOnInsert` e nada mais: a primeira lista do dia não é reescrita por um
+   * reinício à tarde. O caminho quente vê os boots em ordem, então o primeiro
+   * que chega é o mais antigo; a exceção (o Mongo fora do ar no boot) é o que
+   * `mongo:roster-backfill` conserta.
+   */
+  rosterOps(): AnyBulkWriteOperation<GroupRosterDailyDoc>[] {
+    return [...this.rosters.values()].map(({ _id, ...doc }) => ({
+      updateOne: { filter: { _id }, update: { $setOnInsert: doc }, upsert: true },
+    })) as AnyBulkWriteOperation<GroupRosterDailyDoc>[];
   }
 
   messageRollupOps(): AnyBulkWriteOperation<MessageDoc>[] {
@@ -1002,6 +1024,9 @@ export class Ingestor {
     const group = batch.group(groupId, payload.subject ?? event.group?.name ?? null);
     group.eventAt(when);
 
+    const roster = rosterFromSnapshot(event);
+    if (roster) batch.roster(roster);
+
     // A composição do dia é a única coisa aqui que não dá para recalcular
     // depois: o WhatsApp só responde pelo estado de agora.
     const membership = batch.membership(groupId, timeParts(when).date).seenAt(when);
@@ -1029,6 +1054,7 @@ export class Ingestor {
       this.bulk(COLLECTIONS.groups, batch.groupOps()),
       this.bulk(COLLECTIONS.activityDaily, batch.dailyOps()),
       this.bulk(COLLECTIONS.groupMembersDaily, batch.membershipOps()),
+      this.bulk(COLLECTIONS.groupRosterDaily, batch.rosterOps()),
       this.bulk(COLLECTIONS.messages, batch.messageRollupOps()),
     ]);
   }

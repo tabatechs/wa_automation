@@ -37,6 +37,9 @@
  *   `group_members_daily` — o de hoje. A série de composição anterior fica no
  *   conjunto de origem: ela não sai de evento nenhum, e copiá-la seria copiar
  *   documento, que é justamente o que este script não faz.
+ *   `group_roster_daily` não recebe nem o dia de hoje: o snapshot remontado é
+ *   `manual`, e só boot vira lista oficial. No destino, a série se refaz com
+ *   `mongo:roster-backfill` sobre o JSONL, com o `.env` do destino.
  *
  * ## O que a remontagem NÃO carrega: campo escrito por outra ferramenta
  *

@@ -461,14 +461,19 @@ export class MetricsBuilder {
     log.debug('linhas órfãs da série removidas', { pessoas: orfaos.length, linhas: deletedCount });
   }
 
-  /** Troca o id de uma pessoa dentro das listas diárias, sem perder o dia. */
+  /**
+   * Troca o id de uma pessoa dentro das listas diárias, sem perder o dia.
+   *
+   * Vale também para a lista oficial: nela, deixar o id velho faria a pessoa
+   * "sair" no dia da fusão e "entrar" de novo com o id novo.
+   */
   private async repointMembership(db: Db, de: string, para: string): Promise<void> {
-    const collection = db.collection<GroupMembersDailyDoc>(
-      this.col(COLLECTIONS.groupMembersDaily),
-    );
-    for (const campo of ['members', 'admins'] as const) {
-      await collection.updateMany({ [campo]: de }, { $addToSet: { [campo]: para } });
-      await collection.updateMany({ [campo]: de }, { $pull: { [campo]: de } });
+    for (const nome of [COLLECTIONS.groupMembersDaily, COLLECTIONS.groupRosterDaily]) {
+      const collection = db.collection<{ members: string[]; admins: string[] }>(this.col(nome));
+      for (const campo of ['members', 'admins'] as const) {
+        await collection.updateMany({ [campo]: de }, { $addToSet: { [campo]: para } });
+        await collection.updateMany({ [campo]: de }, { $pull: { [campo]: de } });
+      }
     }
   }
 

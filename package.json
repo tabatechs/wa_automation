@@ -22,7 +22,8 @@
     "probe-history": "tsx src/scripts/probe-history.ts",
     "probe-groups": "tsx src/scripts/probe-groups.ts",
     "mongo:fix-members": "tsx src/scripts/mongo-fix-members.ts",
-    "mongo:fix-messages": "tsx src/scripts/mongo-fix-messages.ts"
+    "mongo:fix-messages": "tsx src/scripts/mongo-fix-messages.ts",
+    "mongo:roster-backfill": "tsx src/scripts/roster-backfill.ts"
   },
   "engines": {
     "node": ">=20"

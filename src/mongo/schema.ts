@@ -23,6 +23,7 @@ export const COLLECTIONS = {
   memberEvents: 'member_events',
   activityDaily: 'activity_daily',
   groupMembersDaily: 'group_members_daily',
+  groupRosterDaily: 'group_roster_daily',
   events: 'events',
 } as const;
 
@@ -414,6 +415,46 @@ export interface GroupMembersDailyDoc {
   groups?: number;
 }
 
+/**
+ * A lista **oficial** de um grupo num dia: a da primeira varredura de boot.
+ *
+ * Existe porque `group_members_daily` responde outra pergunta. Aquela é a
+ * união de todos os snapshots do dia, então o número muda hora a hora, quem
+ * sai no meio do dia continua contando e um reinício à tarde soma em vez de
+ * refazer a conta. Aqui o número é fixado uma vez e não mexe mais: saídas do
+ * dia D são quem estava na lista oficial de D−1 e não está na de D.
+ *
+ * Por que o boot e não qualquer snapshot: é a única varredura completa e sem
+ * memória. O `Roster` nasce de novo a cada `wire()`, então no boot não há
+ * cache nem `lastGoodMembers` para devolver lista velha — ou a lista veio do
+ * WhatsApp agora, ou o snapshot sai vazio e é ignorado. Os snapshots de
+ * `participants_changed` podem vir do cache (TTL de `ROSTER_TTL_MS`) ou da
+ * última lista boa, sem TTL.
+ *
+ * "Primeira do dia" é literal: um reinício por crash às 02:20 ganha do
+ * reinício programado das 04:30. As duas são varreduras completas, e fixar
+ * pela ordem em vez de pelo horário não depende de como a VM agenda o
+ * reinício. Um grupo que entra na whitelist no meio do dia ganha a linha no
+ * primeiro boot em que aparece.
+ *
+ * **Sem boot no dia, sem linha.** O reinício diário é agendado na VM, não
+ * neste repositório; se ele parar, os dias sem boot ficam sem lista. Quem lê
+ * compara D com o último dia anterior que tiver linha, nunca com zero.
+ */
+export interface GroupRosterDailyDoc {
+  /** `${groupId}|${YYYY-MM-DD}`, dia em São Paulo. */
+  _id: string;
+  groupId: string;
+  date: string;
+  /** Horário do snapshot que virou a lista oficial. */
+  capturedAt: Date;
+  /** Hoje só `boot`; o campo existe para uma fonte nova não se confundir com esta. */
+  source: 'boot';
+  /** `personId` de cada participante — o `_id` de `people`, repontado nas fusões. */
+  members: string[];
+  admins: string[];
+}
+
 /** Cópia fiel do evento do JSONL, quando `MONGO_RAW_LOG` está ligado. */
 export interface RawEventDoc {
   _id: string;
@@ -468,6 +509,12 @@ export const INDEXES: Record<CollectionName, IndexDescription[]> = {
     { key: { groupId: 1, date: -1 } },
     // A série do alcance é sempre uma janela de datas, com ou sem grupo.
     { key: { date: -1 } },
+  ],
+  [COLLECTIONS.groupRosterDaily]: [
+    { key: { groupId: 1, date: -1 } },
+    { key: { date: -1 } },
+    // A fusão de identidades procura as linhas de uma pessoa para repontá-la.
+    { key: { members: 1 } },
   ],
   [COLLECTIONS.events]: [{ key: { capturedAt: -1 } }, { key: { type: 1 } }],
 };
